@@ -7,10 +7,15 @@ on:
 
 jobs:
   build:
-    name: Build HeiMaoInterceptor
-    runs-on: macos-15
+    name: Build (${{ matrix.runner }})
+    # 同时挂三种 macOS 机型抢机器：GitHub 免费机器池排队紧张时，
+    # 谁先被分配到 runner 谁就编，其余任务编完/取消都不影响产物。
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
-
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-14, macos-13]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,15 +24,18 @@ jobs:
         run: |
           xcodebuild -version
           xcode-select -p
+          sw_vers
 
       - name: Install XcodeGen
         run: |
           brew install xcodegen || brew upgrade xcodegen
+          xcodegen --version
 
       - name: Generate Xcode project
         run: |
           xcodegen generate
           ls -la
+          ls -la Resources
 
       - name: Build unsigned archive
         run: |
@@ -61,12 +69,17 @@ jobs:
           cd "$RUNNER_TEMP"
           zip -qry HeiMaoInterceptor.ipa Payload
           ls -lh HeiMaoInterceptor.ipa
-          unzip -l HeiMaoInterceptor.ipa | head -20
+          unzip -l HeiMaoInterceptor.ipa | head -30
+          echo "--- bundle check ---"
+          ls -la "$APP"
+          ls -la "$APP/PlugIns" || true
+          test -f "$APP/rules.txt" && echo "rules.txt OK" || echo "rules.txt MISSING"
+          echo "IPA_SIZE=$(stat -f%z HeiMaoInterceptor.ipa)" >> "$GITHUB_ENV"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: HeiMaoInterceptor-ipa
+          name: HeiMaoInterceptor-ipa-${{ matrix.runner }}
           path: ${{ runner.temp }}/HeiMaoInterceptor.ipa
           if-no-files-found: error
           retention-days: 30
