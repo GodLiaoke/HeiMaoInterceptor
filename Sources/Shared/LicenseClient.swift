@@ -67,9 +67,9 @@ final class LicenseClient {
                 st.code = code.uppercased()
                 st.authorized = true
                 st.lastCheck = Date()
-                if let exp = obj["expire_at"] as? Double {
+                if let exp = self.num(obj["expire_at"]) {
                     st.expireAt = Date(timeIntervalSince1970: exp)
-                } else if let insec = obj["expires_in"] as? Double {
+                } else if let insec = self.num(obj["expires_in"]) {
                     st.expireAt = Date().addingTimeInterval(insec)
                 }
                 self.applyEnvelope(obj, into: &st)
@@ -97,9 +97,9 @@ final class LicenseClient {
             st.code = code
             st.authorized = (obj["authorized"] as? Bool) ?? false
             st.lastCheck = Date()
-            if let exp = obj["expire_at"] as? Double {
+            if let exp = self.num(obj["expire_at"]), exp > 0 {
                 st.expireAt = Date(timeIntervalSince1970: exp)
-            } else if let insec = obj["expires_in"] as? Double, insec > 0 {
+            } else if let insec = self.num(obj["expires_in"]), insec > 0 {
                 st.expireAt = Date().addingTimeInterval(insec)
             }
             if let note = obj["note"] as? String { st.note = note }
@@ -145,14 +145,32 @@ final class LicenseClient {
     }
 
     private func mapError(_ raw: String) -> LicenseError {
+        switch raw.lowercased() {
+        case "card_format":      return .badResponse("卡密格式不对，请检查有没有输错")
+        case "card_not_found":   return .badResponse("卡密不存在")
+        case "card_revoked":     return .badResponse("卡密已被作废")
+        case "card_used":        return .badResponse("这张卡密已经被用过了")
+        case "card_bound":       return .badResponse("卡密已绑定其他设备")
+        case "rate_limited":     return .badResponse("请求太频繁，稍后再试")
+        case "bad_pin":          return .badPin
+        default: break
+        }
         let s = raw.lowercased()
         if s.contains("expire") || s.contains("过期") { return .expired }
         if s.contains("pin") { return .badPin }
-        if s.contains("rate") { return .badResponse("请求太频繁，稍后再试") }
         if s.contains("not_found") || s.contains("used") || s.contains("invalid") {
             return .invalidCode
         }
         return .badResponse(raw.isEmpty ? "卡密验证失败" : raw)
+    }
+
+    /// JSON 数字可能是 Int / Double / 字符串，统一成 Double
+    private func num(_ any: Any?) -> Double? {
+        if let d = any as? Double { return d }
+        if let i = any as? Int { return Double(i) }
+        if let n = any as? NSNumber { return n.doubleValue }
+        if let s = any as? String, let d = Double(s) { return d }
+        return nil
     }
 
     // MARK: - 基础 POST

@@ -11,6 +11,9 @@ enum AppConfig {
     static let appBundleID    = "com.heimao.interceptor"
     static let tunnelBundleID = "com.heimao.interceptor.tunnel"
 
+    /// 设备码长度：服务端只接受 8 位纯数字，必须严格一致
+    static let pinLength      = 8
+
     /// 隧道内部地址（与规则库解耦，只用于接管 DNS 与目标 IP）
     static let clientIP       = "10.111.0.2"
     static let dnsProxyIP     = "10.111.0.1"

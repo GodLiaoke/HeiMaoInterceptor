@@ -27,16 +27,21 @@ final class ConfigStore {
 
     // MARK: - 设备码
 
-    /// 设备码：首次启动生成后固定保存在本地
+    /// 设备码：服务端要求 8 位纯数字（非数字会被服务端过滤掉导致校验失败）
+    /// 首次启动生成后固定保存在本地
     static func makePin() -> String {
         let key = "hm.pin.v1"
-        if let saved = UserDefaults.standard.string(forKey: key), saved.count >= 10 {
+        if let saved = UserDefaults.standard.string(forKey: key),
+           saved.count == AppConfig.pinLength,
+           saved.allSatisfy({ $0.isNumber }) {
             return saved
         }
-        let seed = UUID().uuidString + "|" + String(Date().timeIntervalSince1970)
-        let pin = "HM" + CryptoBox.fingerprint(seed)
-        UserDefaults.standard.set(pin, forKey: key)
-        return pin
+        var digits = ""
+        for _ in 0..<AppConfig.pinLength {
+            digits.append(Character(String(Int.random(in: 0...9))))
+        }
+        UserDefaults.standard.set(digits, forKey: key)
+        return digits
     }
 
     var pin: String { license.pin.isEmpty ? ConfigStore.makePin() : license.pin }
@@ -80,6 +85,10 @@ final class ConfigStore {
             return p.rules
         }
         if let url = Bundle.main.url(forResource: "rules", withExtension: "txt"),
+           let text = try? String(contentsOf: url, encoding: .utf8) {
+            return text
+        }
+        if let url = Bundle.main.url(forResource: "rules", withExtension: "txt", subdirectory: "Rules"),
            let text = try? String(contentsOf: url, encoding: .utf8) {
             return text
         }

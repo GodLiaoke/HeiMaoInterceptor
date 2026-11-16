@@ -27,7 +27,6 @@ targets:
       - path: Sources/App
       - path: Sources/Shared
       - path: Resources/Rules
-        type: folder
         buildPhase: resources
       - path: Resources/Assets.xcassets
         buildPhase: resources
@@ -52,12 +51,11 @@ targets:
       - path: Sources/Tunnel
       - path: Sources/Shared
       - path: Resources/Rules
-        type: folder
         buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.heimao.interceptor.tunnel
-        ASSETCATALOG_COMPILER_APPICON_NAME: ""
+        APPLICATION_EXTENSION_API_ONLY: YES
         INFOPLIST_FILE: Resources/Info-Tunnel.plist
         CODE_SIGN_ENTITLEMENTS: Resources/Tunnel.entitlements
         GENERATE_INFOPLIST_FILE: NO
