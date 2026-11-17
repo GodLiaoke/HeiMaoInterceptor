@@ -143,8 +143,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ipv4.includedRoutes = routes
         settings.ipv4Settings = ipv4
 
+        /* DNS 必须接管「所有域名」：matchDomains 留空（nil）才表示全部，
+           之前写成 [""]（一个空字符串）等价于不匹配任何域名，
+           系统 DNS 查询压根不进隧道 —— 域名规则因此一条都用不上。 */
         let dns = NEDNSSettings(servers: [dnsIP])
-        dns.matchDomains = [""]
         settings.dnsSettings = dns
 
         setTunnelNetworkSettings(settings) { [weak self] error in
