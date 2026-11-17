@@ -14,6 +14,12 @@ final class TunnelEngine {
         var blockedConn = 0
         var passedDNS = 0
         var cacheHits = 0
+        /// 进隧道的包总数：这个数是 0 就说明系统的流量压根没进隧道
+        var tunnelPackets = 0
+        /// 收到的 DNS 查询数（含转发和黑洞）
+        var dnsQueries = 0
+        /// 不该进隧道的包（路由补集没生效时会冒出来）
+        var stray = 0
         var startedAt = Date()
 
         var json: [String: Any] {
@@ -24,6 +30,9 @@ final class TunnelEngine {
              "conn": blockedConn,
              "passed": passedDNS,
              "cache": cacheHits,
+             "tunnel": tunnelPackets,
+             "dns": dnsQueries,
+             "stray": stray,
              "uptime": Int(Date().timeIntervalSince(startedAt))]
         }
 
@@ -123,6 +132,7 @@ final class TunnelEngine {
 
     private func handle(_ data: Data) {
         guard let p = PacketCodec.parse(data) else { return }
+        statsLock.lock(); stats.tunnelPackets += 1; statsLock.unlock()
 
         /* 域名黑洞：命中的域名解析到 sinkhole 地址，连接进来一律断掉。
            HTTPS / QUIC 都在这里断，所以不需要解密 TLS，也不需要装证书。 */
@@ -140,8 +150,11 @@ final class TunnelEngine {
         }
 
         if p.proto == 17, let udp = p.udp {
-            // DNS 走代理地址
-            if p.dstIP == dnsIPv4 && udp.dstPort == 53 {
+            /* 只要是 53 端口的 UDP 就当 DNS 处理，不挑目标地址。
+               系统在隧道里可能仍按旧的 DNS 服务器发查询（换网 / 缓存 / DoH 回退），
+               只认 dnsIPv4 会把这些查询漏掉 —— 那正是「DNS 没接管」的典型表现。 */
+            if udp.dstPort == 53 {
+                statsLock.lock(); stats.dnsQueries += 1; statsLock.unlock()
                 handleDNS(p)
                 return
             }
@@ -152,14 +165,19 @@ final class TunnelEngine {
                 statsLock.unlock()
                 return          // UDP 直接丢
             }
+            statsLock.lock(); stats.stray += 1; statsLock.unlock()
             return
         }
 
         if p.proto == 6, let tcp = p.tcp {
             if isBlocked(p.dstIP, port: tcp.dstPort) {
                 dropTCP(p, key: PacketCodec.flowKey(p))
+            } else {
+                /* 非规则流量正常应该在隧道外（excludedRoutes）。这里收到说明
+                   路由补集没生效，记数用于判断，不在这里断用户的路。 */
+                statsLock.lock(); stats.stray += 1; statsLock.unlock()
             }
-            return              // 业务 TCP 永不转发
+            return
         }
     }
 
@@ -265,7 +283,7 @@ final class TunnelEngine {
         let key = TunnelEngine.cacheKey(query.qname, query.qtype)
 
         if let cached = cachedResponse(key: key, id: query.id) {
-            let out = PacketCodec.buildUDP(src: dnsIPv4, dst: p.srcIP,
+            let out = PacketCodec.buildUDP(src: p.dstIP, dst: p.srcIP,
                                            srcPort: udp.dstPort, dstPort: udp.srcPort,
                                            payload: cached)
             write([out])
@@ -276,7 +294,7 @@ final class TunnelEngine {
         if blocked {
             let answer = DNSMessage.buildSinkhole(for: query, ip: sinkholeIPv4)
             storeCache(key: key, response: answer, blocked: true)
-            let out = PacketCodec.buildUDP(src: dnsIPv4, dst: p.srcIP,
+            let out = PacketCodec.buildUDP(src: p.dstIP, dst: p.srcIP,
                                            srcPort: udp.dstPort, dstPort: udp.srcPort,
                                            payload: answer)
             write([out])
@@ -301,7 +319,7 @@ final class TunnelEngine {
             if let key = cacheKey {
                 self.storeCache(key: key, response: response, blocked: false)
             }
-            let out = PacketCodec.buildUDP(src: self.dnsIPv4, dst: p.srcIP,
+            let out = PacketCodec.buildUDP(src: p.dstIP, dst: p.srcIP,
                                            srcPort: udp.dstPort, dstPort: udp.srcPort,
                                            payload: response)
             self.write([out])
