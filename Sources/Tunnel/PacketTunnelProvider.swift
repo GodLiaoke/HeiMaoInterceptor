@@ -23,6 +23,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var verifyTimer: DispatchSourceTimer?
     /// 统计落盘定时器：sendProviderMessage 丢回包时 App 靠这份兜底
     private var statsTimer: DispatchSourceTimer?
+    /// 本机直连的统计服务：不走沙箱共享目录、不走消息回调，环境挡不住
+    private var statsServer: StatsServer?
+    /// 快照会被四条通道同时拼装（定时器 / 消息回包 / 落盘 / 直连服务），
+    /// 规则热更新又会在主线程换 ruleSet —— 加把锁，免得读到半个规则集
+    private let payloadLock = NSLock()
     private var stopReason = ""
     /// 当前阶段：starting / running / stopped:原因 / failed:原因
     /// App 那边靠它判断隧道卡在哪一步，不用再靠猜
@@ -43,6 +48,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         /* 主程序把自己的 Documents 路径传过来了，统计就按这个路径写。
            这是跨进程最稳的一条通道：不依赖 App Group 容器有没有被系统建出来。 */
         StatsBridge.setExtraDir(conf["statsDir"] as? String)
+
+        /* 本机直连统计服务：从一开始就起。
+           这是「扩展回传统计」最硬的一条路 —— 不走消息回调、不写共享目录，
+           伪签名环境和隧道重连都影响不到它。 */
+        startStatsServer()
 
         guard !pin.isEmpty else {
             phase = "failed:no_pin"
@@ -136,7 +146,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             completionHandler(TunnelError.ruleSetEmpty)
             return
         }
-        ruleSet = parsed
+        payloadLock.lock(); ruleSet = parsed; payloadLock.unlock()
         dnsIP = (conf["dnsIP"] as? String) ?? AppConfig.dnsProxyIP
         clientIP = (conf["clientIP"] as? String) ?? AppConfig.clientIP
         sinkholeIP = (conf["sinkholeIP"] as? String) ?? AppConfig.sinkholeIP
@@ -293,7 +303,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         StatsBridge.write(statsPayload())
         statsTimer?.cancel()
         statsTimer = nil
-        ruleSet = RuleSet()
+        stopStatsServer()
+        payloadLock.lock(); ruleSet = RuleSet(); payloadLock.unlock()
         engine?.stop()
         engine = nil
         if reason == "route_hijack_failed" {
@@ -303,8 +314,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    /// 统计快照：provider message 和落盘通道共用同一份，两边数字必须一致
+    /// 统计快照：provider message / 落盘 / 本机直连服务共用同一份，三边数字必须一致
     private func statsPayload() -> [String: Any] {
+        payloadLock.lock()
+        defer { payloadLock.unlock() }
+
         var payload = engine?.snapshot() ?? [:]
         payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
         payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
@@ -340,6 +354,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         statsTimer = t
     }
 
+    /// 起本机直连统计服务（只有回环能连）：
+    /// App 每 3 秒连一次问数字，服务器一停端口就消失，不存在残留状态。
+    private func startStatsServer() {
+        guard statsServer == nil else { return }
+        let server = StatsServer { [weak self] in
+            self?.statsPayload() ?? [:]
+        }
+        server.start()
+        statsServer = server
+    }
+
+    private func stopStatsServer() {
+        statsServer?.stop()
+        statsServer = nil
+    }
+
     override func stopTunnel(with reason: NEProviderStopReason,
                              completionHandler: @escaping () -> Void) {
         statsTimer?.cancel()
@@ -348,12 +378,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         phase = "stopped"
         /* 在引擎还活着时落最后一份：App 下一次轮询还能把停止前的数字读出来 */
         StatsBridge.write(statsPayload())
+        stopStatsServer()
         verifyTimer?.cancel()
         verifyTimer = nil
         engine?.stop()
         engine = nil
         /* 关闭即卸载：不在扩展进程里留任何规则副本 */
-        ruleSet = RuleSet()
+        payloadLock.lock(); ruleSet = RuleSet(); payloadLock.unlock()
         verifyFails = 0
         completionHandler()
     }
@@ -390,7 +421,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                         completionHandler?(Data("reject".utf8))
                         return
                     }
-                    self.ruleSet = newRules
+                    self.payloadLock.lock(); self.ruleSet = newRules; self.payloadLock.unlock()
                     self.engine?.update(rules: newRules)
                     completionHandler?(Data("ok".utf8))
                 }

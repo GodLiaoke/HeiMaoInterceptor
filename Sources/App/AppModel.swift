@@ -571,10 +571,10 @@ final class AppModel: ObservableObject {
     // MARK: - 统计
 
     func pollStats() {
-        tunnel.fetchStats { [weak self] obj in
+        tunnel.fetchStats { [weak self] obj, channel in
             guard let self = self else { return }
             if !obj.isEmpty {
-                self.applyStats(obj, source: "隧道回包")
+                self.applyStats(obj, source: channel.isEmpty ? "隧道回包" : channel)
                 return
             }
             /* 回包丢了（扩展忙 / 会话刚建立 / 正在切网）：直接读扩展每 2 秒落盘的快照。
@@ -611,7 +611,7 @@ final class AppModel: ObservableObject {
     var diagText: String {
         guard !stats.isEmpty else {
             return tunnel.isConnected
-                ? "隧道已连接，但扩展没回传统计（通道断了，不是没流量）"
+                ? "隧道已连接，但扩展没回传统计（三条通道都没通，不是没流量）"
                 : "隧道未连接"
         }
         let tunnelPackets = num("tunnel")

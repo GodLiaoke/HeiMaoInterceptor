@@ -178,43 +178,62 @@ final class TunnelController: ObservableObject {
 
     /// 拉统计
     ///
+    /// 三条通道按顺序试，谁先给出数字用谁：
+    ///   1. 本机直连（扩展里的统计服务，回环 TCP）—— 不依赖沙箱共享目录和消息回调，
+    ///      伪签名环境、隧道刚重连都不影响，是现在的主通道
+    ///   2. sendProviderMessage（官方通道）—— 环境正常时的备选
+    ///   3. 扩展落盘的快照 —— 前两条都断了才用（由调用方读 StatsBridge）
+    func fetchStats(completion: @escaping ([String: Any], String) -> Void) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let direct = StatsLink.fetch()
+            if !direct.isEmpty {
+                DispatchQueue.main.async { completion(direct, "本机直连") }
+                return
+            }
+            DispatchQueue.main.async { self?.fetchStatsViaMessage(completion: completion) }
+        }
+    }
+
+    /// 官方通道：问扩展要一份统计
+    ///
     /// `sendProviderMessage` 没有重传，扩展忙或系统切换网络时会一直不回调。
-    /// 这里加 2.5 秒硬超时，保证每次轮询一定有结果（拿不到就回空，上层读扩展落盘的快照）。
+    /// 这里加 2 秒硬超时，保证每次轮询一定有结果（拿不到就回空，上层读落盘快照）。
     ///
     /// 顺带修一处：以前 `session.status != .connected` 就直接返回空。
     /// 隧道正在 reassert（切网）或者 manager 拿到的是另一条旧配置时，
     /// 这一条 guard 会把统计通道整条掐死，面板永远 0。
     /// 现在只要 manager 在就发一次，发不出去由 try? 吞掉，上层照样读落盘快照。
-    func fetchStats(completion: @escaping ([String: Any]) -> Void) {
+    private func fetchStatsViaMessage(completion: @escaping ([String: Any], String) -> Void) {
         guard let session = manager?.connection as? NETunnelProviderSession else {
-            completion([:]); return
+            completion([:], ""); return
         }
 
         let lock = NSLock()
         var done = false
-        let finish: ([String: Any]) -> Void = { obj in
+        let finish: ([String: Any], String) -> Void = { obj, channel in
             lock.lock()
             if done { lock.unlock(); return }
             done = true
             lock.unlock()
-            completion(obj)
+            completion(obj, channel)
         }
 
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.5) {
-            finish([:])
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
+            finish([:], "")
         }
 
         do {
             try session.sendProviderMessage(Data("stats".utf8)) { data in
                 guard let data = data,
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    finish([:]); return
+                      let any = try? JSONSerialization.jsonObject(with: data),
+                      let obj = any as? [String: Any] else {
+                    finish([:], ""); return
                 }
-                finish(obj)
+                finish(obj, "隧道回包")
             }
         } catch {
             lastStatsError = error.localizedDescription
-            finish([:])
+            finish([:], "")
         }
     }
 }
