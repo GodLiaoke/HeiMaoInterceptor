@@ -3,13 +3,15 @@ import CryptoKit
 
 /// 云端规则：凭卡密鉴权下载，AES-256-GCM 解密后只放在内存
 ///
+/// 两层加密：
+///   1. 传输层走 v3 加密通道（SecureChannel），抓包只有密文
+///   2. 规则包本身再用「设备码 + 卡密 + 当日桶 + 版本」派生的密钥加密
+///
 /// 不落盘：规则明文只存在于本进程内存，退出即消失。
-/// 密钥：SHA256(pin|卡密|当日桶|规则版本) → HKDF-SHA256，服务端每天 UTC 0 点轮换。
+/// 密钥每天 UTC 0 点轮换，隔天旧密钥自动失效。
 final class RuleService {
 
     static let shared = RuleService()
-
-    private let session: URLSession
 
     /// 规则明文（仅内存）
     private(set) var text: String?
@@ -19,15 +21,7 @@ final class RuleService {
 
     private var loading = false
 
-    private init() {
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 20
-        cfg.timeoutIntervalForResource = 45
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        cfg.httpAdditionalHeaders = ["Accept": "application/json",
-                                     "User-Agent": "HeiMaoInterceptor/\(AppConfig.appVersion) (iOS)"]
-        session = URLSession(configuration: cfg)
-    }
+    private init() {}
 
     var isLoaded: Bool { text != nil }
 
@@ -54,20 +48,16 @@ final class RuleService {
         }
         loading = true
 
-        post("/rules/manifest", body: ["pin": pin, "code": norm]) { [weak self] result in
+        SecureChannel.post("/rules/manifest",
+                           params: ["code": norm], pin: pin) { [weak self] result in
             guard let self = self else { return }
 
             switch result {
             case .failure(let err):
                 self.loading = false
-                completion(.failure(err))
+                completion(.failure(self.translate(err)))
 
-            case .success(let data):
-                guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    self.loading = false
-                    completion(.failure(LicenseError.badResponse("服务器返回异常")))
-                    return
-                }
+            case .success(let obj):
                 guard (obj["ok"] as? Bool) == true,
                       let version = obj["version"] as? String,
                       let bucket = obj["bucket"] as? String else {
@@ -78,12 +68,23 @@ final class RuleService {
                 }
                 let wantSha = (obj["sha256"] as? String)?.lowercased() ?? ""
 
-                self.post("/rules/download",
-                          body: ["pin": pin, "code": norm, "version": version]) { r2 in
-
-                    guard case .success(let blob) = r2 else {
+                SecureChannel.post("/rules/download",
+                                   params: ["code": norm, "version": version],
+                                   pin: pin) { r2 in
+                    guard case .success(let obj2) = r2 else {
                         self.loading = false
-                        if case .failure(let e) = r2 { completion(.failure(e)) }
+                        if case .failure(let e) = r2 {
+                            completion(.failure(self.translate(e)))
+                        }
+                        return
+                    }
+
+                    guard (obj2["ok"] as? Bool) == true,
+                          let blobB64 = obj2["blob"] as? String,
+                          let blob = Data(base64Encoded: blobB64) else {
+                        self.loading = false
+                        let raw = (obj2["error"] as? String) ?? ""
+                        completion(.failure(LicenseError.badResponse(self.mapError(raw))))
                         return
                     }
 
@@ -127,48 +128,35 @@ final class RuleService {
         }
     }
 
-    // MARK: - 网络
-
-    private func post(_ path: String, body: [String: Any],
-                      completion: @escaping (Result<Data, Error>) -> Void) {
-        guard let url = URL(string: AppConfig.apiBase + path) else {
-            completion(.failure(LicenseError.network)); return
+    /// 加密通道的错误 → 业务文案
+    private func translate(_ err: Error) -> Error {
+        if let sec = err as? SecureChannel.Failure {
+            switch sec {
+            case .network:
+                return LicenseError.network
+            case .server(let m):
+                return LicenseError.badResponse(mapError(m).isEmpty ? m : mapError(m))
+            case .signature, .crypto:
+                return LicenseError.crypto
+            case .badPayload:
+                return LicenseError.badResponse("服务器返回异常")
+            }
         }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        session.dataTask(with: req) { data, resp, err in
-            if let http = resp as? HTTPURLResponse, http.statusCode >= 400 {
-                if let data = data,
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let raw = obj["error"] as? String {
-                    completion(.failure(LicenseError.badResponse(self.mapError(raw))))
-                } else {
-                    completion(.failure(LicenseError.badResponse("服务端错误 \(http.statusCode)")))
-                }
-                return
-            }
-            guard let data = data else {
-                completion(.failure(err ?? LicenseError.network)); return
-            }
-            completion(.success(data))
-        }.resume()
+        return err
     }
 
     private func mapError(_ raw: String) -> String {
         switch raw {
-        case "card_expired":  return "卡密已到期，请续费后再下载规则"
-        case "card_revoked":  return "卡密已被作废"
+        case "card_expired":   return "卡密已到期，请续费后再下载规则"
+        case "card_revoked":   return "卡密已被作废"
         case "card_not_found": return "卡密不存在"
-        case "card_bound":    return "这张卡已绑定其他设备，请联系管理员解绑"
-        case "card_format":   return "卡密格式不对"
-        case "no_rules":      return "云端暂无可用规则"
-        case "rate_limited":  return "请求太频繁，稍后再试"
-        case "bad_pin":       return "设备码异常，请重装应用"
-        case "":              return "规则下载失败，请重试"
-        default:              return "规则下载失败：\(raw)"
+        case "card_bound":     return "这张卡已绑定其他设备，请联系管理员解绑"
+        case "card_format":    return "卡密格式不对"
+        case "no_rules":       return "云端暂无可用规则"
+        case "rate_limited":   return "请求太频繁，稍后再试"
+        case "bad_pin":        return "设备码异常，请重装应用"
+        case "":               return "规则下载失败，请重试"
+        default:               return SecureChannel.friendly(raw)
         }
     }
 }

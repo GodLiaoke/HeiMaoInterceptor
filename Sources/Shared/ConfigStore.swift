@@ -58,19 +58,30 @@ final class ConfigStore {
     func clearLicense() {
         var st = LicenseState.empty(pin: ConfigStore.makePin())
         st.lastCheck = .distantPast
+        st.verdict = .noCard
+        st.verifiedAt = nil
         save(license: st)
         RuleService.shared.clear()
     }
 
     var isAuthorized: Bool { license.isUsable() }
 
-    /// 卡密与在线窗口的一次刷新（兑换 / 续期 / 查询共用）
+    /// 卡密与在线窗口的一次刷新（兑换 / 续期 / 校验 / 查询共用）
+    ///
+    /// 判定结果（verdict）永远用服务端最新给的那份；
+    /// 只有卡密到期时间在服务端没带回来时才沿用本地的，避免显示成「—」。
     func applySession(_ st: LicenseState, pin: String, code: String) {
         var merged = st
         merged.pin = pin
         merged.code = code.isEmpty ? license.code : code
         if merged.expireAt == nil && merged.code == license.code {
             merged.expireAt = license.expireAt
+        }
+        /* 服务端明确判死时，本地有效期也一并作废，防止界面残留旧到期时间误导 */
+        if merged.verdict.isHardFailure {
+            merged.expireAt = merged.expireAt
+            merged.sessionUntil = Date(timeIntervalSince1970: 0)
+            merged.authorized = false
         }
         save(license: merged)
     }

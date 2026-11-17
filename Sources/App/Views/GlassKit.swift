@@ -215,7 +215,8 @@ struct StatTile: View {
 
 struct PowerOrb: View {
     let on: Bool
-    let busy: Bool
+    var busy: Bool = false
+    var blocked: Bool = false
     @State private var spin: Double = 0
     @State private var pulse: CGFloat = 0
 
@@ -271,15 +272,20 @@ struct PowerOrb: View {
                     ProgressView()
                         .progressViewStyle(CircularProgressViewStyle(tint: .white))
                         .scaleEffect(1.1)
+                } else if blocked {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 38, weight: .semibold))
+                        .foregroundColor(HK.amber)
+                        .shadow(color: HK.amber.opacity(0.7), radius: 14)
                 } else {
                     Image(systemName: on ? "shield.fill" : "power")
                         .font(.system(size: 40, weight: .semibold))
                         .foregroundColor(.white)
                         .shadow(color: on ? HK.cyan.opacity(0.9) : .clear, radius: 14)
                 }
-                Text(on ? "运行中" : "开启防护")
+                Text(blocked ? "授权失效" : (on ? "运行中" : "开启防护"))
                     .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white.opacity(0.88))
+                    .foregroundColor(blocked ? HK.amber : .white.opacity(0.88))
                     .kerning(1.2)
             }
         }
@@ -321,5 +327,179 @@ struct DividerLine: View {
             .fill(LinearGradient(colors: [.clear, Color.white.opacity(0.14), .clear],
                                  startPoint: .leading, endPoint: .trailing))
             .frame(height: 0.6)
+    }
+}
+
+// MARK: - 醒目公告条（置顶）
+
+struct NoticeBanner: View {
+    let title: String
+    let content: String
+    let updated: String
+    @Binding var expanded: Bool
+
+    private var shownText: String {
+        if expanded { return content }
+        // 收起时只露一行半，够看出是什么事
+        return content
+    }
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.25)) { expanded.toggle() }
+        } label: {
+            HStack(alignment: .top, spacing: 11) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(colors: [HK.amber.opacity(0.95), HK.pink.opacity(0.85)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        .frame(width: 30, height: 30)
+                        .shadow(color: HK.amber.opacity(0.55), radius: 10)
+                    Image(systemName: "megaphone.fill")
+                        .font(.system(size: 12.5, weight: .bold))
+                        .foregroundColor(.black.opacity(0.82))
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 6) {
+                        Text(title.isEmpty ? "最新公告" : title)
+                            .font(.system(size: 13.5, weight: .bold, design: .rounded))
+                            .foregroundColor(HK.text)
+                            .lineLimit(1)
+                        Text("公告")
+                            .font(.system(size: 9, weight: .heavy, design: .rounded))
+                            .foregroundColor(.black.opacity(0.8))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(HK.amber))
+                        Spacer(minLength: 0)
+                    }
+
+                    Text(shownText)
+                        .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                        .foregroundColor(HK.textDim)
+                        .lineSpacing(4)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(expanded ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 6) {
+                        if !updated.isEmpty {
+                            Text("更新于 \(updated)")
+                                .font(.system(size: 9.5, weight: .regular, design: .rounded))
+                                .foregroundColor(HK.textFaint)
+                        }
+                        Spacer()
+                        Text(expanded ? "收起" : "展开全文")
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundColor(HK.amber)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundColor(HK.amber)
+                    }
+                }
+            }
+            .padding(14)
+            .background(
+                ZStack {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [HK.amber.opacity(0.20), HK.pink.opacity(0.08), Color.white.opacity(0.03)],
+                                startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                }
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(
+                        LinearGradient(colors: [HK.amber.opacity(0.65), Color.white.opacity(0.10)],
+                                       startPoint: .topLeading, endPoint: .bottomTrailing),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: HK.amber.opacity(0.16), radius: 18, y: 8)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - 授权异常横幅
+
+struct AlertBanner: View {
+    let text: String
+    var actionTitle: String = "去处理"
+    var action: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(HK.pink)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text(text)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundColor(HK.text)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let action = action {
+                    Button(action: action) {
+                        Text(actionTitle)
+                            .font(.system(size: 11.5, weight: .bold, design: .rounded))
+                            .foregroundColor(.black.opacity(0.85))
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(HK.pink))
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(13)
+        .background(
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .fill(HK.pink.opacity(0.12))
+                .overlay(RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            .stroke(HK.pink.opacity(0.45), lineWidth: 0.9))
+        )
+    }
+}
+
+// MARK: - 小按钮（玻璃质感）
+
+struct GlassButton: View {
+    let title: String
+    var icon: String? = nil
+    var tint: Color = HK.cyan
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let icon = icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 11, weight: .bold))
+                }
+                Text(title)
+                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+            }
+            .foregroundColor(tint)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 11)
+            .background(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .fill(tint.opacity(0.12))
+                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                .stroke(tint.opacity(0.28), lineWidth: 0.7))
+            )
+        }
+        .buttonStyle(.plain)
     }
 }

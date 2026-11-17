@@ -5,7 +5,7 @@ enum AppConfig {
 
     static let appName        = "黑猫公益拦截"
     static let appVersion     = "1.0"
-    static let buildNumber    = 100
+    static let buildNumber    = 101          // 1.0 补充更新（授权判定 / 加密通道 / 公告）
     static let apiBase        = "https://ios.ouovo.cc/api"
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
@@ -28,11 +28,19 @@ enum AppConfig {
     /// 云端配置包解密盐（参与密钥派生，改动会导致旧配置包失效）
     static let configSalt     = "HeiMao-Club-2026::cfg::v1"
 
+    /// v3 加密通道主密钥（与服务端 storage/config.php 的 api_key 一致）
+    /// 只用于包内，不参与任何界面展示；抓包只能拿到密文
+    static let secureMasterKey = "ef60b1af85040f5c403ad712b1f2a1816b01c1461647b0f676b0f32cb5d1c2d9"
+
     /// 授权宽限期：在线校验窗口过期后，本地再容忍这么久（断网/抖动不误判）
+    /// 注意：卡密被作废 / 到期时不走宽限，立即失效
     static let offlineGrace: TimeInterval = 10 * 60
 
     /// 心跳间隔：每 60 秒推一次在线校验窗口（服务端窗口 600 秒）
     static let heartbeatInterval: TimeInterval = 60
+
+    /// 强校验间隔：隧道运行中每 5 分钟向服务端核对一次真实授权
+    static let tunnelVerifyInterval: TimeInterval = 5 * 60
 
     /// 云端规则包密钥派生参数（必须与服务端 RulesService 一致）
     static let rulesSalt = "heimao-salt-v1"

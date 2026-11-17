@@ -10,41 +10,24 @@ struct AppUpdateInfo {
     var force: Bool
 }
 
-/// 版本检测：GET /api/app/version?platform=ios&current=1.0
+/// 版本检测：走 v3 加密通道调用 /app/version
 final class VersionService {
 
     static let shared = VersionService()
 
-    private let session: URLSession
-
-    private init() {
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 12
-        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
-        cfg.httpAdditionalHeaders = ["Accept": "application/json",
-                                     "User-Agent": "HeiMaoInterceptor/\(AppConfig.appVersion) (iOS)"]
-        session = URLSession(configuration: cfg)
-    }
+    private init() {}
 
     /// 返回 (是否有更新, 是否强制, 最新版本信息)
     func check(current: String = AppConfig.appVersion,
+               pin: String = "",
                completion: @escaping (_ update: Bool, _ force: Bool, _ info: AppUpdateInfo?) -> Void) {
 
-        var comps = URLComponents(string: AppConfig.apiBase + "/app/version")
-        comps?.queryItems = [
-            URLQueryItem(name: "platform", value: "ios"),
-            URLQueryItem(name: "current", value: current)
-        ]
-        guard let url = comps?.url else {
-            completion(false, false, nil); return
-        }
+        let device = pin.isEmpty ? "00000000" : pin
 
-        var req = URLRequest(url: url)
-        req.httpMethod = "GET"
-
-        session.dataTask(with: req) { data, _, _ in
-            guard let data = data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        SecureChannel.post("/app/version",
+                           params: ["platform": "ios", "current": current],
+                           pin: device) { result in
+            guard case .success(let obj) = result else {
                 completion(false, false, nil); return
             }
             let hasUpdate = (obj["update_available"] as? Bool) ?? false
@@ -63,6 +46,6 @@ final class VersionService {
             DispatchQueue.main.async {
                 completion(true, force, info)
             }
-        }.resume()
+        }
     }
 }

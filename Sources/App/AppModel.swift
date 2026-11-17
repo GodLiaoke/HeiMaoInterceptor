@@ -8,12 +8,18 @@ final class AppModel: ObservableObject {
     @Published var license: LicenseState = ConfigStore.shared.license
     @Published var authorized: Bool = false
     @Published var announcement: LicenseClient.Announcement?
+    @Published var announcementOpen: Bool = false
     @Published var cloudNotice: String?
     @Published var stats: [String: Any] = [:]
     @Published var ruleCounts: (ips: Int, domains: Int) = (0, 0)
     @Published var ruleSource: String = "未加载"
     @Published var rulesLoading: Bool = false
     @Published var rulesError: String?
+
+    /// 授权异常横幅（卡密作废 / 到期 / 未激活时给用户看的原因）
+    @Published var authAlert: String?
+    /// 正在向服务端确认授权
+    @Published var verifying: Bool = false
 
     /// 版本
     @Published var updateInfo: AppUpdateInfo?
@@ -31,6 +37,7 @@ final class AppModel: ObservableObject {
     private var renewTimer: AnyCancellable?
     private var tunnelObserver: AnyCancellable?
     private var lastRenew = Date.distantPast
+    private var verifyingNow = false
 
     init() {
         refreshRules()
@@ -60,6 +67,8 @@ final class AppModel: ObservableObject {
                 self.refreshLicense(silent: true)
             }
 
+        /* 启动即强校验：不信任本地缓存，先问服务端 */
+        verifyNow()
         bootstrapRules()
         checkUpdate()
     }
@@ -75,11 +84,10 @@ final class AppModel: ObservableObject {
         cloudNotice = ConfigStore.shared.cloudNotice
     }
 
-    /// 启动时：有授权就把规则拉下来
+    /// 有授权就把规则拉下来
     private func bootstrapRules() {
         guard ConfigStore.shared.isAuthorized else { return }
         loadRules(force: false)
-        refreshLicense(silent: true)
     }
 
     func loadRules(force: Bool) {
@@ -115,12 +123,65 @@ final class AppModel: ObservableObject {
     func refreshLocal() {
         license = ConfigStore.shared.license
         authorized = license.isUsable()
+        if authorized {
+            authAlert = nil
+        } else if license.code.isEmpty {
+            /* 还没激活过：主界面已经有「激活卡密」入口，不必再顶一条红色警告 */
+            authAlert = nil
+        } else {
+            authAlert = license.blockReason
+        }
     }
 
     func loadAnnouncement() {
-        LicenseClient.shared.fetchAnnouncement { ann in
+        LicenseClient.shared.fetchAnnouncement(pin: pin) { ann in
             DispatchQueue.main.async {
                 if let ann = ann { self.announcement = ann }
+            }
+        }
+    }
+
+    /// 强校验：每次真的问服务端「这张卡现在到底还能不能用」
+    /// 触发时机：App 启动 / 回到前台 / 开启 VPN 之前 / 手动刷新
+    func verifyNow(completion: ((Bool) -> Void)? = nil) {
+        guard !verifyingNow else {
+            completion?(authorized)
+            return
+        }
+        verifyingNow = true
+        verifying = true
+
+        LicenseClient.shared.check(pin: pin) { result in
+            DispatchQueue.main.async {
+                self.verifyingNow = false
+                self.verifying = false
+                switch result {
+                case .success(let st):
+                    var s = st
+                    s.code = ConfigStore.shared.license.code
+                    ConfigStore.shared.applySession(s, pin: self.pin, code: s.code)
+                    self.refreshLocal()
+
+                    if !self.authorized {
+                        /* 服务端说不能用了：立刻停隧道、清规则、
+                           界面同步成未授权，不再出现「显示已授权但 VPN 起不来」 */
+                        self.authAlert = s.blockReason
+                        RuleService.shared.clear()
+                        self.refreshRules()
+                        if self.tunnel.isConnected { self.tunnel.stop() }
+                    } else if !RuleService.shared.isLoaded {
+                        self.loadRules(force: false)
+                    }
+                    completion?(self.authorized)
+
+                case .failure(let err):
+                    /* 网络问题不改判定，交给窗口 + 宽限兜住 */
+                    self.refreshLocal()
+                    if !self.authorized {
+                        self.authAlert = err.localizedDescription
+                    }
+                    completion?(self.authorized)
+                }
             }
         }
     }
@@ -141,6 +202,7 @@ final class AppModel: ObservableObject {
                     self.refreshLocal()
                     self.showLicense = false
                     self.licenseInput = ""
+                    self.authAlert = nil
                     self.toast = "授权成功，有效期至 \(st.expireText)"
                     self.loadRules(force: true)
                 case .failure(let err):
@@ -150,7 +212,8 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// 续期：失败不直接判未授权，交给窗口 + 宽限兜住
+    /// 续期：失败不直接判未授权（交给窗口 + 宽限）；
+    /// 但服务端明确说卡密作废 / 到期，就必须当场失效。
     func refreshLicense(silent: Bool = false) {
         let code = license.code
         guard !code.isEmpty else { return }
@@ -164,11 +227,38 @@ final class AppModel: ObservableObject {
                 case .success(let st):
                     ConfigStore.shared.applySession(st, pin: self.pin, code: code)
                     self.refreshLocal()
+                    if !self.authorized {
+                        self.authAlert = st.blockReason
+                        RuleService.shared.clear()
+                        self.refreshRules()
+                        if self.tunnel.isConnected { self.tunnel.stop() }
+                        return
+                    }
                     let v = RuleService.shared.version
                     if self.authorized && v != ConfigStore.shared.rulesVersion {
                         self.loadRules(force: true)
                     }
                 case .failure(let err):
+                    /* 卡密作废 / 到期：服务端会明确报错，这时立刻降级 */
+                    if let le = err as? LicenseError {
+                        switch le {
+                        case .revoked, .expired:
+                            var s = ConfigStore.shared.license
+                            s.verdict = (le.errorDescription == LicenseError.revoked.errorDescription)
+                                ? .cardRevoked : .cardExpired
+                            s.authorized = false
+                            s.sessionUntil = Date(timeIntervalSince1970: 0)
+                            ConfigStore.shared.save(license: s)
+                            self.refreshLocal()
+                            self.authAlert = s.blockReason
+                            RuleService.shared.clear()
+                            self.refreshRules()
+                            if self.tunnel.isConnected { self.tunnel.stop() }
+                            if !silent { self.toast = le.localizedDescription }
+                            return
+                        default: break
+                        }
+                    }
                     if !silent { self.toast = err.localizedDescription }
                 }
             }
@@ -183,7 +273,7 @@ final class AppModel: ObservableObject {
             completion()
             return
         }
-        guard ConfigStore.shared.isAuthorized else {
+        guard !ConfigStore.shared.license.code.isEmpty else {
             showLicense = true
             toast = "请先激活卡密"
             completion()
@@ -196,19 +286,31 @@ final class AppModel: ObservableObject {
             return
         }
 
+        /* 开 VPN 前必须先向服务端确认一次：卡密作废 / 到期绝不允许起隧道，
+           避免「界面显示已授权、VPN 却开不起来」这种前后矛盾 */
         busy = true
-        tunnel.start { result in
-            DispatchQueue.main.async {
+        verifyNow { ok in
+            guard ok else {
                 self.busy = false
-                switch result {
-                case .success:
-                    if let notice = ConfigStore.shared.cloudNotice, !notice.isEmpty {
-                        self.toast = notice
-                    }
-                case .failure(let err):
-                    self.toast = "启动失败：\(err.localizedDescription)"
-                }
+                self.showLicense = self.license.code.isEmpty
+                self.toast = self.authAlert ?? "授权已失效，请刷新状态"
                 completion()
+                return
+            }
+            self.busy = true
+            self.tunnel.start { result in
+                DispatchQueue.main.async {
+                    self.busy = false
+                    switch result {
+                    case .success:
+                        if let notice = ConfigStore.shared.cloudNotice, !notice.isEmpty {
+                            self.toast = notice
+                        }
+                    case .failure(let err):
+                        self.toast = "启动失败：\(err.localizedDescription)"
+                    }
+                    completion()
+                }
             }
         }
     }
@@ -216,7 +318,7 @@ final class AppModel: ObservableObject {
     // MARK: - 版本
 
     func checkUpdate() {
-        VersionService.shared.check { hasUpdate, force, info in
+        VersionService.shared.check(pin: pin) { hasUpdate, force, info in
             self.updateInfo = info
             self.forceUpdate = hasUpdate && force
             if hasUpdate && !force {

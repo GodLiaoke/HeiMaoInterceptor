@@ -15,6 +15,7 @@ struct SettingsView: View {
                 VStack(spacing: 16) {
                     header
 
+                    announcementCard
                     licenseCard
                     deviceCard
                     rulesCard
@@ -49,6 +50,64 @@ struct SettingsView: View {
             }
         }
         .padding(.bottom, 4)
+    }
+
+    // MARK: - 公告（置顶）
+
+    private var announcementCard: some View {
+        VStack(spacing: 9) {
+            SectionHeader(title: "公告", subtitle: "NOTICE")
+            if let ann = model.announcement, !(ann.content.isEmpty && ann.title.isEmpty) {
+                GlassCard(padding: 16, corner: 20) {
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(spacing: 7) {
+                            Image(systemName: "megaphone.fill")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundColor(HK.amber)
+                            Text(ann.title.isEmpty ? "最新公告" : ann.title)
+                                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                                .foregroundColor(HK.text)
+                            Spacer()
+                        }
+                        Text(ann.content)
+                            .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                            .foregroundColor(HK.textDim)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if !ann.updatedAt.isEmpty {
+                            Text("更新于 \(MainView.prettyTime(ann.updatedAt))")
+                                .font(.system(size: 10, weight: .regular, design: .rounded))
+                                .foregroundColor(HK.textFaint)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                GlassCard(padding: 16, corner: 20) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "megaphone")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(HK.textFaint)
+                        Text("暂无公告")
+                            .font(.system(size: 12.5, design: .rounded))
+                            .foregroundColor(HK.textFaint)
+                        Spacer()
+                        Button { model.loadAnnouncement() } label: {
+                            Text("刷新")
+                                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                                .foregroundColor(HK.cyan)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    static func timeText(_ d: Date) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "MM-dd HH:mm:ss"
+        return f.string(from: d)
     }
 
     // MARK: - 卡密
@@ -103,9 +162,9 @@ struct SettingsView: View {
                         }
 
                         Button {
-                            model.refreshLicense()
+                            model.verifyNow { _ in }
                         } label: {
-                            Text("刷新状态")
+                            Text(model.verifying ? "校验中…" : "刷新状态")
                                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                                 .foregroundColor(HK.text)
                                 .frame(maxWidth: .infinity)
@@ -128,6 +187,8 @@ struct SettingsView: View {
                             value: model.license.code.isEmpty ? "—" : model.license.expireText)
                     InfoRow(title: "剩余时间", value: model.license.remainText)
                     InfoRow(title: "本次校验", value: model.license.sessionText)
+                    InfoRow(title: "最后确认",
+                            value: model.license.verifiedAt.map { SettingsView.timeText($0) } ?? "未校验")
                     InfoRow(title: "规则版本", value: model.ruleSource)
                 }
             }
@@ -180,8 +241,9 @@ struct SettingsView: View {
                     DividerLine()
                     HStack(spacing: 10) {
                         Button {
-                            model.refreshLicense(silent: true)
-                            model.loadRules(force: true)
+                            model.verifyNow { ok in
+                                if ok { model.loadRules(force: true) }
+                            }
                         } label: {
                             Text("同步云端规则")
                                 .font(.system(size: 12.5, weight: .semibold, design: .rounded))

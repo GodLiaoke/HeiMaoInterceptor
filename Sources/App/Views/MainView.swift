@@ -13,12 +13,36 @@ struct MainView: View {
             AuroraBackground()
 
             ScrollView(showsIndicators: false) {
-                VStack(spacing: 18) {
+                VStack(spacing: 16) {
                     topBar
                         .padding(.top, 8)
 
-                    PowerOrb(on: model.tunnel.isConnected, busy: model.busy)
-                        .padding(.vertical, 6)
+                    // 公告永远在最显眼的位置，一条都不藏
+                    if let ann = model.announcement, !(ann.content.isEmpty && ann.title.isEmpty) {
+                        NoticeBanner(title: ann.title,
+                                     content: ann.content,
+                                     updated: MainView.prettyTime(ann.updatedAt),
+                                     expanded: $model.announcementOpen)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+
+                    // 授权出问题就顶在最上面，讲清原因
+                    if let alert = model.authAlert {
+                        AlertBanner(text: alert,
+                                    actionTitle: model.license.code.isEmpty ? "输入卡密" : "刷新状态",
+                                    action: {
+                                        if model.license.code.isEmpty {
+                                            showSettings = true
+                                        } else {
+                                            model.verifyNow { _ in }
+                                        }
+                                    })
+                    }
+
+                    PowerOrb(on: model.tunnel.isConnected,
+                             busy: model.busy,
+                             blocked: !model.authorized)
+                        .padding(.vertical, 2)
                         .onTapGesture {
                             let impact = UIImpactFeedbackGenerator(style: .medium)
                             impact.impactOccurred()
@@ -31,9 +55,6 @@ struct MainView: View {
 
                     statusCard
                     statsSection
-                    if let ann = model.announcement, !ann.content.isEmpty {
-                        announcementCard(ann)
-                    }
                     channelCard
                     footer
                 }
@@ -114,6 +135,13 @@ struct MainView: View {
 
             Spacer()
 
+            if model.verifying {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: HK.cyan))
+                    .scaleEffect(0.75)
+                    .frame(width: 40, height: 40)
+            }
+
             Button {
                 model.loadAnnouncement()
                 showSettings = true
@@ -133,14 +161,17 @@ struct MainView: View {
     private var statusLine: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(model.tunnel.isConnected ? HK.mint : HK.textFaint)
+                .fill(model.tunnel.isConnected ? HK.mint
+                      : (model.authorized ? HK.textFaint : HK.pink))
                 .frame(width: 6, height: 6)
             Text(model.tunnel.statusText)
                 .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundColor(model.tunnel.isConnected ? HK.mint : HK.textDim)
+                .foregroundColor(model.tunnel.isConnected ? HK.mint
+                                 : (model.authorized ? HK.textDim : HK.pink))
             Text("·")
                 .foregroundColor(HK.textFaint)
-            Text(model.tunnel.isConnected ? "运行 \(model.uptimeText)" : "轻触上方开启")
+            Text(model.tunnel.isConnected ? "运行 \(model.uptimeText)"
+                 : (model.authorized ? "轻触上方开启" : "授权失效，无法开启"))
                 .font(.system(size: 12, weight: .regular, design: .rounded))
                 .foregroundColor(HK.textFaint)
         }
@@ -158,36 +189,37 @@ struct MainView: View {
                     Spacer()
                     GlassPill(text: model.license.statusText(),
                               icon: model.authorized ? "checkmark.seal.fill" : "lock.fill",
-                              tint: model.authorized ? HK.mint : HK.amber)
+                              tint: model.authorized ? HK.mint : HK.pink)
                 }
                 DividerLine()
+                InfoRow(title: "卡密",
+                        value: model.license.code.isEmpty ? "未激活卡密" : model.license.maskedCode,
+                        mono: true)
                 InfoRow(title: "到期时间",
-                        value: model.license.code.isEmpty ? "未激活卡密" : model.license.expireText,
+                        value: model.license.code.isEmpty ? "—" : model.license.expireText,
                         valueColor: model.authorized ? HK.text : HK.amber)
                 InfoRow(title: "剩余时间", value: model.license.remainText)
-                InfoRow(title: "规则库来源",
+                InfoRow(title: "规则库",
                         value: model.ruleSource,
                         valueColor: HK.text)
                 InfoRow(title: "规则规模",
                         value: "\(model.ruleCounts.ips) IP · \(model.ruleCounts.domains) 域名")
-                InfoRow(title: "规则版本", value: model.ruleSource)
-                if !model.authorized {
-                    Button {
-                        showSettings = true
-                    } label: {
-                        Text("激活卡密")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundColor(HK.bg)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(
-                                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                                    .fill(LinearGradient(colors: [HK.cyan, HK.blue],
-                                                         startPoint: .leading, endPoint: .trailing))
-                            )
+
+                HStack(spacing: 10) {
+                    GlassButton(title: model.verifying ? "校验中…" : "刷新状态",
+                                icon: "arrow.triangle.2.circlepath",
+                                tint: HK.cyan) {
+                        model.verifyNow { _ in }
                     }
-                    .padding(.top, 2)
+                    if !model.authorized {
+                        GlassButton(title: "激活卡密",
+                                    icon: "key.fill",
+                                    tint: HK.amber) {
+                            showSettings = true
+                        }
+                    }
                 }
+                .padding(.top, 2)
             }
         }
     }
@@ -208,38 +240,6 @@ struct MainView: View {
                          icon: "bolt.horizontal.fill")
                 StatTile(value: model.udpText, label: "UDP 丢弃", tint: HK.mint,
                          icon: "waveform.path.ecg")
-            }
-        }
-    }
-
-    // MARK: - 公告
-
-    private func announcementCard(_ ann: LicenseClient.Announcement) -> some View {
-        VStack(spacing: 10) {
-            SectionHeader(title: "公告", subtitle: "NOTICE")
-            GlassCard(padding: 16, corner: 22) {
-                VStack(alignment: .leading, spacing: 9) {
-                    HStack(spacing: 7) {
-                        Image(systemName: "megaphone.fill")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(HK.amber)
-                        Text(ann.title.isEmpty ? "最新公告" : ann.title)
-                            .font(.system(size: 13.5, weight: .semibold, design: .rounded))
-                            .foregroundColor(HK.text)
-                        Spacer()
-                    }
-                    Text(ann.content)
-                        .font(.system(size: 12.5, weight: .regular, design: .rounded))
-                        .foregroundColor(HK.textDim)
-                        .lineSpacing(4)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if !ann.updatedAt.isEmpty {
-                        Text(ann.updatedAt)
-                            .font(.system(size: 10, weight: .regular, design: .rounded))
-                            .foregroundColor(HK.textFaint)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -289,6 +289,18 @@ struct MainView: View {
                 .foregroundColor(HK.textFaint.opacity(0.7))
         }
         .padding(.top, 8)
+    }
+
+    // MARK: - 工具
+
+    /// 服务端给的是秒级时间戳字符串，转成「11-17 13:20」
+    static func prettyTime(_ raw: String) -> String {
+        guard let ts = Double(raw), ts > 0 else { return raw }
+        let d = Date(timeIntervalSince1970: ts)
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "zh_CN")
+        f.dateFormat = "MM-dd HH:mm"
+        return f.string(from: d)
     }
 }
 
