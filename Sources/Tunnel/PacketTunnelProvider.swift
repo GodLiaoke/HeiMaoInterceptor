@@ -131,42 +131,47 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let sinkValue = RuleSet.ipToUInt(sinkholeIP) ?? 0x0A6F0009
         var plan = parsed.routePlan(forceInside: [dnsValue, sinkValue])
 
-        /* 兼容：App 侧若在配置里额外给了路由，并进接管列表 */
-        if let raw = conf["routes"] as? [[String: Any]] {
+        /* 依次尝试：精确补集 → /24 聚合 → /16 聚合 → 只接管规则段。
+           前三种都保住「隧道是默认出口」，也就是 DNS 一定进隧道；
+           最后一种只在系统死活装不下时兜底，至少防护能用。 */
+        var exact = plan
+        if let raw = conf["routes"] as? [[String: Any]], plan.hijackAll {
             for item in raw {
                 guard let ip = item["ip"] as? String else { continue }
-                let prefix = (item["prefix"] as? Int) ?? 32
-                plan.included.append((ip, prefix))
+                exact.excluded.removeAll { $0.0 == ip }
             }
         }
-        routeInfo = plan.description
+        var wide24 = parsed.routePlan(forceInside: [dnsValue, sinkValue], coarsenTo: 24)
+        wide24.hijackAll = plan.hijackAll
+        var wide16 = parsed.routePlan(forceInside: [dnsValue, sinkValue], coarsenTo: 16)
+        wide16.hijackAll = plan.hijackAll
 
+        var split = RuleSet.RoutePlan()
+        split.degraded = true
+        split.included = RuleSet.cidrs(from: parsed.blockedRanges())
+        split.included.append((dnsIP, 32))
+        split.included.append((sinkholeIP, 32))
+
+        applyRoutePlan([exact, wide24, wide16, split], mtu: mtu,
+                       completion: completionHandler)
+    }
+
+    /// 逐个尝试路由方案，第一个装得进去的生效
+    private func applyRoutePlan(_ plans: [RuleSet.RoutePlan], mtu: Int, index: Int = 0,
+                                completion: @escaping (Error?) -> Void) {
+        guard index < plans.count else {
+            completion(TunnelError.routeSetupFailed); return
+        }
+        let plan = plans[index]
         setTunnelNetworkSettings(buildSettings(plan, mtu: mtu)) { [weak self] error in
             guard let self = self else { return }
             if error == nil {
+                self.routeInfo = plan.description
                 self.startEngine()
-                completionHandler(nil)
+                completion(nil)
                 return
             }
-
-            /* 全接管方案没装进去（路由条数太多 / 系统拒绝）：退回只接管规则段，
-               宁可 DNS 可能不生效，也不能让用户开不了防护或者断网。 */
-            var fallback = RuleSet.RoutePlan()
-            fallback.degraded = true
-            fallback.included = RuleSet.cidrs(from: parsed.blockedRanges())
-            fallback.included.append((dnsIP, 32))
-            fallback.included.append((sinkholeIP, 32))
-            self.routeInfo = "降级 · 按规则段接管 \(fallback.included.count) 条"
-
-            self.setTunnelNetworkSettings(self.buildSettings(fallback, mtu: mtu)) { [weak self] err2 in
-                guard let self = self else { return }
-                if let err2 = err2 {
-                    completionHandler(err2)
-                    return
-                }
-                self.startEngine()
-                completionHandler(nil)
-            }
+            self.applyRoutePlan(plans, mtu: mtu, index: index + 1, completion: completion)
         }
     }
 
@@ -198,6 +203,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         startedAt = Date()
         engine.start()
         startVerifyLoop()
+
+        /* 保险：全接管方案如果被系统忽略了排除路由，用户会「上不了网」。
+           启动 20 秒后看一眼统计，旁路包占了绝大多数就直接断开，
+           宁可防护失效也不能让用户断网。 */
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
+            guard let self = self, let engine = self.engine else { return }
+            let snap = engine.snapshot()
+            let total = (snap["tunnel"] as? Int) ?? 0
+            let stray = (snap["stray"] as? Int) ?? 0
+            if total > 300 && stray > total * 3 / 4 {
+                self.dropProtection(reason: "route_hijack_failed")
+            }
+        }
     }
 
     /// 运行中复查：卡密中途被作废 / 到期，隧道主动断开
@@ -242,7 +260,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ruleSet = RuleSet()
         engine?.stop()
         engine = nil
-        cancelTunnelWithError(TunnelError.licenseInvalid(reason))
+        if reason == "route_hijack_failed" {
+            cancelTunnelWithError(TunnelError.routeBroken)
+        } else {
+            cancelTunnelWithError(TunnelError.licenseInvalid(reason))
+        }
     }
 
     override func stopTunnel(with reason: NEProviderStopReason,
@@ -328,6 +350,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case licenseExpired
         case configExpired
         case ruleSetEmpty
+        case routeSetupFailed
+        case routeBroken
         case licenseInvalid(String)
 
         var errorDescription: String? {
@@ -340,6 +364,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return "授权配置已过期，请重新激活"
             case .ruleSetEmpty:
                 return "云端规则为空，请稍后重试"
+            case .routeSetupFailed:
+                return "隧道网络设置失败，请重启应用后重试"
+            case .routeBroken:
+                return "这台设备的系统没接受拦截路由（为避免断网已自动关闭），请把这条提示发给管理员"
             case .licenseInvalid(let reason):
                 switch reason {
                 case "card_revoked":   return "卡密已被作废，防护无法开启"
