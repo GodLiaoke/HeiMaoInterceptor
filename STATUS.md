@@ -2,7 +2,33 @@
 
 ## 当前版本
 
-**v1.0.4 build 107**（2026-11-17 · 巨魔签名兼容 / 拦截内核升级）
+**v1.0.5 build 108**（2026-11-17 · 稳定设备码 / 重装不掉授权 / 下载页改版）
+
+### 1.0.5 改了什么
+
+**设备码重构（卸载重装不再换码）**
+
+- 旧实现：`ConfigStore.makePin()` 首次启动随机生成 8 位数字存 UserDefaults，卸载即丢
+- 新实现：`DeviceIdentity`，取源优先级 —— 钥匙串 → 老版本遗留码（原样沿用）→
+  MobileGestalt 设备唯一标识 → 随机 128 位 + 硬件锚（型号/内存/CPU/磁盘）
+- 设备码 = SHA256(设备标识|hm-pin-v2) 取 8 位十进制；设备指纹 dev = SHA256(…|hm-dev-v2) 前 32 hex
+- 每次请求 body 带 `dev`，服务端据此识别「同一台设备换了设备码」
+- 巨魔 entitlements 补 `application-identifier` / `keychain-access-groups`，
+  否则伪签名环境下钥匙串返回 -34018，重装后仍会变码
+
+**服务端换机迁移**
+
+- `cards.bound_dev` 记录设备指纹；同一 dev 换 pin → 自动迁移绑定（`rebind_same_device`）
+- 升级前绑的老卡（无 bound_dev）：旧设备码闲置 15 分钟即可认领一次（`rebind_legacy`），之后严格按指纹
+- `auth/check` 新增 `adoptByDev`：新设备码 + 已知指纹 → 直接认回卡密，重装后连卡密都不用重输
+- 测试：同 dev 换 pin 迁移成功、异 dev 被判 card_bound、无卡设备靠 dev 找回成功
+
+**下载页（public/index.php 重写）**
+
+- 改为下载页：巨魔直装 / 自签安装两行，按 /dl 下安装包自动聚合最新 build
+- 删除在线激活、历史版本、公告区块；更新内容置顶
+- 中性色浅色界面，无渐变/发光/emoji，行式左右布局，统一线性图标
+- 服务端版本表已更 1.0.5 / 108，`force_update = 1`，下载地址 `https://ios.ouovo.cc`
 
 正式名称：**黑猫拦截 Pro**（显示名、包内标题、设置页统一）
 
