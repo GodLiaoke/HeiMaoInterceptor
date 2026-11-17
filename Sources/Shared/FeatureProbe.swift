@@ -60,7 +60,7 @@ enum FeatureProbe {
             c = (c & 1) != 0 ? (0xEDB8_8320 ^ (c >> 1)) : (c >> 1)
         }
         return c
-    }()
+    }
 
     static func crc32(_ bytes: [UInt8]) -> UInt32 {
         var c: UInt32 = 0xFFFF_FFFF
@@ -111,7 +111,7 @@ enum FeatureProbe {
             crc("\(set.report.exactIPs)/\(set.report.cidrs)"),
             crc("\(set.report.domains)"),
             crc(set.domains.sorted().joined(separator: ",")),
-            crc("\(set.ports.sorted().map(String.init).joined(separator: ","))"),
+            crc(set.ports.sorted().map { "\($0)" }.joined(separator: ",")),
             crc("\(set.report.direct)/\(set.report.skipped)")
         ])
     }

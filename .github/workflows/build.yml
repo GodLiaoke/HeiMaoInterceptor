@@ -40,6 +40,20 @@ jobs:
             if grep -rq "\b$n\b" Sources/ 2>/dev/null; then echo "SYMBOL_LEFT: $n"; fi
           done
 
+      - name: Syntax pre-check
+        run: |
+          # 只做语法解析，不做类型检查：几秒钟就能拦住拼写/括号这类低级错误，
+          # 免得四个 runner 一起排队十来分钟才发现一个括号问题
+          fail=0
+          for f in $(find Sources -name '*.swift'); do
+            if ! swiftc -parse "$f" >/tmp/sc.log 2>&1; then
+              echo "SYNTAX_FAIL: $f"
+              cat /tmp/sc.log
+              fail=1
+            fi
+          done
+          [ "$fail" = "0" ] && echo "SYNTAX_OK"
+
       - name: Generate Xcode project
         run: |
           xcodegen generate
