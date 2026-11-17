@@ -388,7 +388,7 @@ final class AppModel: ObservableObject {
                         } else {
                             /* 心跳连续失败到阈值：按链路断了处理，卸载规则并断开隧道 */
                             self.renewFailures += 1
-                            if self.renewFailures >= 3 {
+                            if self.renewFailures >= 2 {
                                 self.renewFailures = 0
                                 RuleService.shared.clear()
                                 self.refreshRules()

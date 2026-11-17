@@ -185,7 +185,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard case .success(let obj) = result else {
                 /* 一次失败不动作；连续失败等于心跳断了，规则立刻作废并断开隧道 */
                 self.verifyFails += 1
-                if self.verifyFails >= 3 {
+                if self.verifyFails >= 2 {
                     self.verifyFails = 0
                     self.dropProtection(reason: "heartbeat_lost")
                 }

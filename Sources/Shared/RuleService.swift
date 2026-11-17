@@ -88,6 +88,9 @@ final class RuleService {
         setCount = 0
         setDetails = []
         packVersion = ""
+        /* 名字也一起清：否则关了防护界面还挂着上一轮的套名 */
+        UserDefaults.standard.removeObject(forKey: RuleService.namesKey)
+        UserDefaults.standard.removeObject(forKey: RuleService.countKey)
     }
 
     /// 把一段规则文本喂进来并解析（内存态，不落盘）
