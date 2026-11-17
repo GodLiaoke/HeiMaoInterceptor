@@ -81,7 +81,19 @@ struct RuleSet {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if body.isEmpty { return }
 
-            for token in splitTokens(body) {
+            let tokens = splitTokens(body)
+
+            /* hosts 格式：0.0.0.0 x.com 是拦截，127.0.0.1 x.com 是放行 */
+            if tokens.count > 1, let head = RuleSet.ipToUInt(tokens[0]),
+               head == 0 || head == 0x7F000001 {
+                let isDirectHost = (head == 0x7F000001)
+                for token in tokens.dropFirst() {
+                    rs.insertDomain(token, direct: isDirectHost)
+                }
+                return
+            }
+
+            for token in tokens {
                 rs.absorb(token, section: section, cidrList: &cidrList)
             }
         }
@@ -124,10 +136,8 @@ struct RuleSet {
         // 正则类规则直接跳过
         if t.hasPrefix("/") || t.hasPrefix("[") { report.skipped += 1; return }
 
-        // hosts / dnsmasq 的地址行：0.0.0.0 domain
-        if (section == "" || section == "domain"), !t.contains("/"),
-           let ip = RuleSet.ipToUInt(t0), ip == 0 || ip == 0x7F000001 {
-            // 这个 token 是前导地址，真正的域名在后面的 token 里
+        // 单独出现的 0.0.0.0 / 127.0.0.1 只是 hosts 的前导地址，不是规则
+        if let ip = RuleSet.ipToUInt(t0), ip == 0 || ip == 0x7F000001 {
             return
         }
 
