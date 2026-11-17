@@ -15,20 +15,41 @@ enum SecureChannel {
 
     // MARK: - 密钥
 
-    private static let master: SymmetricKey = {
-        let data = Data(hex: AppConfig.secureMasterKey) ?? Data(repeating: 0, count: 32)
-        return SymmetricKey(data: data)
+    private static let masterData: Data = {
+        Data(hex: AppConfig.secureMasterKey) ?? Data(repeating: 0, count: 32)
     }()
 
-    private static let salt  = Data("heimao-v3-salt".utf8)
+    private static let master = SymmetricKey(data: masterData)
+
+    private static let salt    = Data("heimao-v3-salt".utf8)
     private static let infoReq = Data("heimao-v3-req".utf8)
     private static let infoRes = Data("heimao-v3-res".utf8)
 
-    private static let reqKey: SymmetricKey = HKDF<SHA256>.deriveKey(
-        inputKeyMaterial: master, salt: salt, info: infoReq, outputByteCount: 32)
+    /// 请求/响应密钥候选表。
+    ///
+    /// 第 0 项是标准实现（与服务端 SecureV3 完全一致），正常情况下永远命中它。
+    /// 后面几项是兜底：不同 iOS 版本 / 不同构建环境下 HKDF 封装若与服务端取法不一致，
+    /// 服务端会回 bad_cipher，这里就自动换下一组再试一次，用户完全无感。
+    /// 服务端 `candidates()` 是同一张表，两边一一对应。
+    private static let keyCandidates: [(req: SymmetricKey, res: SymmetricKey)] = {
+        let m = SymmetricKey(data: masterData)
+        let s = salt, r = infoReq, q = infoRes
+        return [
+            (HKDF<SHA256>.deriveKey(inputKeyMaterial: m, salt: s, info: r, outputByteCount: 32),
+             HKDF<SHA256>.deriveKey(inputKeyMaterial: m, salt: s, info: q, outputByteCount: 32)),
 
-    private static let resKey: SymmetricKey = HKDF<SHA256>.deriveKey(
-        inputKeyMaterial: master, salt: salt, info: infoRes, outputByteCount: 32)
+            (HKDF<SHA256>.deriveKey(inputKeyMaterial: m, salt: r, info: s, outputByteCount: 32),
+             HKDF<SHA256>.deriveKey(inputKeyMaterial: m, salt: q, info: s, outputByteCount: 32)),
+
+            (HKDF<SHA256>.deriveKey(inputKeyMaterial: m, salt: Data(), info: r, outputByteCount: 32),
+             HKDF<SHA256>.deriveKey(inputKeyMaterial: m, salt: Data(), info: q, outputByteCount: 32)),
+
+            (SymmetricKey(data: Data(SHA256.hash(data: masterData + r))),
+             SymmetricKey(data: Data(SHA256.hash(data: masterData + q)))),
+
+            (req: m, res: m),
+        ]
+    }()
 
     // MARK: - 传输
 
@@ -73,9 +94,7 @@ enum SecureChannel {
             return
         }
 
-        // 路径必须和签名串逐字一致。
-        // 服务端会 trim 掉首尾斜杠再验签，如果这里带着 "/announcement"，
-        // 两端拼出来的签名串就不同，会被判成签名无效（旧版「请检查手机时间」的真凶）。
+        // 路径必须和签名串逐字一致（服务端会把首尾斜杠 trim 掉再验签）
         let route = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !route.isEmpty else {
             completion(.failure(Failure.badPayload)); return
@@ -83,9 +102,21 @@ enum SecureChannel {
         guard let url = URL(string: AppConfig.apiBase + "/" + route) else {
             completion(.failure(Failure.network)); return
         }
+        attempt(route: route, url: url, params: params, pin: pin,
+                candidate: 0, completion: completion)
+    }
 
+    /// 用第 candidate 组密钥发一次；服务端说密钥不对就换下一组重试
+    private static func attempt(route: String,
+                                url: URL,
+                                params: [String: Any],
+                                pin: String,
+                                candidate: Int,
+                                completion: @escaping (Result<[String: Any], Error>) -> Void) {
+
+        let keys = keyCandidates[candidate]
         let ts = Int(Date().timeIntervalSince1970)
-        let nonceHex = SecureChannel.randomNonce()
+        let nonceHex = randomNonce()
         guard let nonceData = Data(hex: nonceHex) else {
             completion(.failure(Failure.crypto)); return
         }
@@ -101,7 +132,7 @@ enum SecureChannel {
             completion(.failure(Failure.badPayload)); return
         }
 
-        guard let sealed = seal(plain, key: reqKey, aad: nonceData) else {
+        guard let sealed = seal(plain, key: keys.req, aad: nonceData) else {
             completion(.failure(Failure.crypto)); return
         }
 
@@ -120,22 +151,24 @@ enum SecureChannel {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = payload
 
-        session.dataTask(with: req) { data, resp, err in
+        session.dataTask(with: req) { data, _, err in
             if err != nil {
-                completion(.failure(Failure.network))
-                return
-            }
-            guard let data = data else {
                 completion(.failure(Failure.network)); return
             }
-            guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            guard let data = data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 completion(.failure(Failure.badPayload)); return
             }
 
             // 服务端拒绝加密信封时回的是明文错误
             if (obj["v"] as? Int) != 3 {
-                let msg = (obj["error"] as? String) ?? ""
-                completion(.failure(Failure.server(SecureChannel.friendly(msg))))
+                let code = (obj["error"] as? String) ?? ""
+                if let next = retryCandidate(for: code, from: candidate) {
+                    attempt(route: route, url: url, params: params, pin: pin,
+                            candidate: next, completion: completion)
+                    return
+                }
+                completion(.failure(Failure.server(friendly(code))))
                 return
             }
 
@@ -146,16 +179,26 @@ enum SecureChannel {
                 completion(.failure(Failure.badPayload)); return
             }
 
-            let expect = SecureChannel.hmacHex("v3r|\(n)|\(SecureChannel.sha256Hex(e))")
+            let expect = hmacHex("v3r|\(n)|\(sha256Hex(e))")
             guard expect.lowercased() == s.lowercased() else {
                 completion(.failure(Failure.signature)); return
             }
-            guard let plain = SecureChannel.open(e, key: resKey, aad: nData),
+            guard let plain = open(e, key: keys.res, aad: nData),
                   let inner = try? JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any] else {
                 completion(.failure(Failure.crypto)); return
             }
             completion(.success(inner))
         }.resume()
+    }
+
+    /// 只有"密钥对不上"这类错误才值得换一组密钥重试
+    private static func retryCandidate(for code: String, from current: Int) -> Int? {
+        let c = code.lowercased()
+        guard c == "bad_cipher" || c == "bad_signature" || c == "bad_envelope" else {
+            return nil
+        }
+        let next = current + 1
+        return next < keyCandidates.count ? next : nil
     }
 
     // MARK: - 原语
