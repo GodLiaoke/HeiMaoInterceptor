@@ -15,6 +15,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var clientIP = AppConfig.clientIP
     private var sinkholeIP = AppConfig.sinkholeIP
     private var startedAt = Date()
+    /// 本次隧道的路由方案描述（诊断用）
+    private var routeInfo = ""
 
     private var pin = ""
     private var code = ""
@@ -120,28 +122,46 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         sinkholeIP = (conf["sinkholeIP"] as? String) ?? AppConfig.sinkholeIP
         let mtu = (conf["mtu"] as? Int) ?? AppConfig.mtu
 
-        // 隧道网络参数：只接管规则 IP + DNS 代理地址，其它流量不碰
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: dnsIP)
         settings.mtu = NSNumber(value: mtu)
 
-        let ipv4 = NEIPv4Settings(addresses: [clientIP], subnetMasks: ["255.255.255.255"])
-        var routes: [NEIPv4Route] = [
-            NEIPv4Route(destinationAddress: dnsIP, subnetMask: "255.255.255.255"),
-            /* 黑洞地址必须进隧道，否则命中的域名只是解析失败，拦断动作统计不到 */
-            NEIPv4Route(destinationAddress: sinkholeIP, subnetMask: "255.255.255.255"),
-        ]
+        /* 路由：**默认路由指向隧道**，规则之外的地址全部排除回物理网络。
+           为什么必须这样：iOS 在 split tunnel（只接管几个网段）下，系统的 DNS
+           查询经常压根不进隧道，DNS 设置等于摆设 —— 表现就是「开了防护一点没拦住」。
+           把隧道设成默认出口后，DNS 设置一定生效，而真正进隧道的仍然只有规则 IP 段
+           （其余的都在 excludedRoutes 里，照常走 Wi-Fi / 蜂窝，不影响上网速度）。 */
+        let dnsValue  = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F0001
+        let sinkValue = RuleSet.ipToUInt(sinkholeIP) ?? 0x0A6F0009
+        var plan = parsed.routePlan(forceInside: [dnsValue, sinkValue])
+
+        /* 兼容：App 侧若在配置里额外给了路由，并进接管列表 */
         if let raw = conf["routes"] as? [[String: Any]] {
             for item in raw {
                 guard let ip = item["ip"] as? String else { continue }
                 let prefix = (item["prefix"] as? Int) ?? 32
-                let mask = PacketTunnelProvider.maskString(prefix)
-                // 避免把 0.0.0.0/0 拉进隧道，误伤正常上网
-                if mask == "0.0.0.0" { continue }
-                routes.append(NEIPv4Route(destinationAddress: ip, subnetMask: mask))
+                plan.included.append((ip, prefix))
             }
         }
-        ipv4.includedRoutes = routes
-        settings.ipv4Settings = ipv4
+        routeInfo = plan.description
+
+        func buildSettings(_ plan: RuleSet.RoutePlan) -> NEPacketTunnelNetworkSettings {
+            let s = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: dnsIP)
+            s.mtu = NSNumber(value: mtu)
+            let v4 = NEIPv4Settings(addresses: [clientIP], subnetMasks: ["255.255.255.255"])
+            v4.includedRoutes = plan.included.map {
+                NEIPv4Route(destinationAddress: $0.0,
+                            subnetMask: PacketTunnelProvider.maskString($0.1))
+            }
+            v4.excludedRoutes = plan.excluded.map {
+                NEIPv4Route(destinationAddress: $0.0,
+                            subnetMask: PacketTunnelProvider.maskString($0.1))
+            }
+            /* DNS 必须接管「所有域名」：matchDomains 留空（nil）才表示全部 */
+            let dns = NEDNSSettings(servers: [dnsIP])
+            s.dnsSettings = dns
+            s.ipv4Settings = v4
+            return s
+        }
 
         /* DNS 必须接管「所有域名」：matchDomains 留空（nil）才表示全部，
            之前写成 [""]（一个空字符串）等价于不匹配任何域名，
@@ -149,12 +169,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let dns = NEDNSSettings(servers: [dnsIP])
         settings.dnsSettings = dns
 
-        setTunnelNetworkSettings(settings) { [weak self] error in
-            guard let self = self else { return }
-            if let error = error {
-                completionHandler(error)
-                return
-            }
+        func startEngine() {
             let engine = TunnelEngine(flow: self.packetFlow, rules: self.ruleSet,
                                       dnsIP: self.dnsIP, clientIP: self.clientIP,
                                       sinkholeIP: self.sinkholeIP)
@@ -162,7 +177,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             self.startedAt = Date()
             engine.start()
             self.startVerifyLoop()
-            completionHandler(nil)
+        }
+
+        setTunnelNetworkSettings(buildSettings(plan)) { [weak self] error in
+            guard let self = self else { return }
+            if error == nil {
+                startEngine()
+                completionHandler(nil)
+                return
+            }
+
+            /* 全接管方案没装进去（路由条数太多 / 系统拒绝）：退回只接管规则段，
+               宁可 DNS 可能不生效，也不能让用户开不了防护或者断网。 */
+            var fallback = RuleSet.RoutePlan()
+            fallback.degraded = true
+            fallback.included = RuleSet.cidrs(from: parsed.blockedRanges())
+            fallback.included.append((dnsIP, 32))
+            fallback.included.append((sinkholeIP, 32))
+            self.routeInfo = "降级 · 按规则段接管 \(fallback.included.count) 条"
+
+            self.setTunnelNetworkSettings(buildSettings(fallback)) { [weak self] err2 in
+                guard let self = self else { return }
+                if let err2 = err2 {
+                    completionHandler(err2)
+                    return
+                }
+                startEngine()
+                completionHandler(nil)
+            }
         }
     }
 
@@ -234,6 +276,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             var payload = engine?.snapshot() ?? [:]
             payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
             payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
+            payload["routes"] = routeInfo
+            payload["dns"] = dnsIP
             payload["ruleReport"] = [
                 "ips": ruleSet.report.exactIPs + ruleSet.report.cidrs,
                 "domains": ruleSet.report.domains,
