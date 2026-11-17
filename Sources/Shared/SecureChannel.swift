@@ -21,9 +21,9 @@ enum SecureChannel {
 
     private static let master = SymmetricKey(data: masterData)
 
-    private static let salt    = Data("heimao-v3-salt".utf8)
-    private static let infoReq = Data("heimao-v3-req".utf8)
-    private static let infoRes = Data("heimao-v3-res".utf8)
+    private static let salt    = Data(Obfs.join(10, 11).utf8)
+    private static let infoReq = Data(Obfs.join(12, 13).utf8)
+    private static let infoRes = Data(Obfs.join(14, 15).utf8)
 
     /// 请求/响应密钥候选表。
     ///

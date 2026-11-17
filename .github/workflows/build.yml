@@ -31,6 +31,15 @@ jobs:
           brew install xcodegen || brew upgrade xcodegen
           xcodegen --version
 
+      - name: Obfuscate symbols
+        run: |
+          # 类型名在构建副本上改成无意义短名，映射表只留在 runner 里（排查崩溃用）
+          SYMBOL_MAP_PATH="$RUNNER_TEMP/symbol-map.txt" python3 Tools/rename_types.py
+          echo "--- 混淆后自检：原类型名不应再出现在源码里 ---"
+          for n in CryptoBox SecureChannel LicenseClient TunnelEngine RuleService DeviceIdentity; do
+            if grep -rq "\b$n\b" Sources/ 2>/dev/null; then echo "SYMBOL_LEFT: $n"; fi
+          done
+
       - name: Generate Xcode project
         run: |
           xcodegen generate
@@ -103,6 +112,42 @@ jobs:
       # 这里把 appex 与主二进制都签上，并带上 platform-application 与
       # NetworkExtension 权限，TrollStore 安装时会沿用这份 entitlements。
       # ---------------------------------------------------------------
+      - name: Verify obfuscation in binary
+        run: |
+          set -o pipefail
+          BIN="$RUNNER_TEMP/Payload/HeiMaoInterceptor.app/HeiMaoInterceptor"
+          EXT="$RUNNER_TEMP/Payload/HeiMaoInterceptor.app/PlugIns/HeiMaoTunnel.appex/HeiMaoTunnel"
+          OUT="$RUNNER_TEMP/obf-report.txt"
+          : > "$OUT"
+
+          echo "=== 敏感常量（明文出现即为失败）===" | tee -a "$OUT"
+          strings -a "$BIN" > "$RUNNER_TEMP/bin.str" || true
+          strings -a "$EXT" > "$RUNNER_TEMP/ext.str" || true
+          HIT=0
+          for k in "ef60b1af" "ios.ouovo" "HeiMao-Club-2026" "heimao-v3-salt" "heimao-salt-v1" "223.5.5.5"; do
+            if grep -q "$k" "$RUNNER_TEMP/bin.str" "$RUNNER_TEMP/ext.str"; then
+              echo "OBF_FAIL: 二进制里仍有 $k" | tee -a "$OUT"
+              HIT=1
+            fi
+          done
+          [ "$HIT" = "0" ] && echo "OBF_OK: 常量全部以密文形式存在" | tee -a "$OUT"
+
+          echo "=== 类型名（可读即为失败）===" | tee -a "$OUT"
+          SHIT=0
+          for n in CryptoBox SecureChannel LicenseClient TunnelEngine RuleService DeviceIdentity AppConfig; do
+            if grep -qw "$n" "$RUNNER_TEMP/bin.str"; then
+              echo "SYMBOL_FAIL: 仍可读到 $n" | tee -a "$OUT"
+              SHIT=1
+            fi
+          done
+          [ "$SHIT" = "0" ] && echo "SYMBOL_OK: 自定义类型名已不可读" | tee -a "$OUT"
+
+          echo "=== 关键结构仍在（混淆不能改坏功能）===" | tee -a "$OUT"
+          grep -w "PacketTunnelProvider" "$RUNNER_TEMP/ext.str" | head -1 | tee -a "$OUT" || echo "WARN: 扩展类名未出现在字符串表（可能被 strip，正常）" | tee -a "$OUT"
+
+          # 只报告不阻断：编译/签名/兼容性那几关才是硬门禁
+          echo "OBF_REPORT_DONE"
+
       - name: Pre-sign for TrollStore
         run: |
           set -e
@@ -160,5 +205,7 @@ jobs:
             ${{ runner.temp }}/HeiMaoInterceptor.ipa
             ${{ runner.temp }}/HeiMaoInterceptor-TrollStore.ipa
             ${{ runner.temp }}/sign.log
+            ${{ runner.temp }}/symbol-map.txt
+            ${{ runner.temp }}/obf-report.txt
           if-no-files-found: error
           retention-days: 30

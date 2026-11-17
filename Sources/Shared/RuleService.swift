@@ -146,7 +146,7 @@ final class RuleService {
     private func download(pin: String, code: String,
                           completion: @escaping (Result<String, Error>) -> Void) {
 
-        SecureChannel.post("/rules/manifest",
+        SecureChannel.post(Obfs.s(26),
                            params: ["code": code], pin: pin) { [weak self] result in
             guard let self = self else { return }
 
@@ -178,7 +178,7 @@ final class RuleService {
                 let incomingCount = (obj["set_count"] as? Int) ?? incomingSets.count
                 let incomingDetails = (obj["sets_detail"] as? [[String: Any]]) ?? []
 
-                SecureChannel.post("/rules/download",
+                SecureChannel.post(Obfs.s(27),
                                    params: ["code": code, "version": version],
                                    pin: pin) { r2 in
                     switch r2 {

@@ -80,7 +80,6 @@ struct RulesDetailView: View {
                     VStack(spacing: 14) {
                         summaryCard
                         setsCard
-                        explainCard
 
                         Button {
                             model.loadRules(force: true)
@@ -238,26 +237,6 @@ struct RulesDetailView: View {
             }
 
             Spacer(minLength: 0)
-        }
-    }
-
-    private var explainCard: some View {
-        GlassCard(padding: 14, corner: 18) {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 7) {
-                    Image(systemName: "info.circle.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(HK.cyan)
-                    Text("多套规则会合并成一个加密包下发")
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                        .foregroundColor(HK.text)
-                }
-                Text("后台可以同时勾选多套规则，服务端按勾选顺序合并、去重后加密下发。App 只拿一个包，所以开启速度和单套一样；这里显示的是每一套的来源和条数。")
-                    .font(.system(size: 10.5, weight: .regular, design: .rounded))
-                    .foregroundColor(HK.textFaint)
-                    .lineSpacing(2.5)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
         }
     }
 

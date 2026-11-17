@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// 本地状态中心：授权、规则、隧道参数
 ///
@@ -25,11 +26,25 @@ final class ConfigStore {
     }
 
     private init() {
-        if let data = defaults.data(forKey: licenseKey),
-           let st = try? JSONDecoder().decode(LicenseState.self, from: data) {
-            _license = st
-        } else {
-            _license = .empty(pin: ConfigStore.makePin())
+        /* 本地这份授权带签名校验：直接改 UserDefaults 里那串数据伪造
+           authorized=true 是无效的，验不过就当作没有授权，重新走服务端。 */
+        var loaded: LicenseState?
+        if let blob = defaults.data(forKey: licenseKey) {
+            if LicenseSeal.isSealed(blob) {
+                if let body = LicenseSeal.open(blob),
+                   let st = try? JSONDecoder().decode(LicenseState.self, from: body) {
+                    loaded = st
+                } else {
+                    loaded = nil          // 签名不对：这份状态不认
+                }
+            } else if let st = try? JSONDecoder().decode(LicenseState.self, from: blob) {
+                loaded = st               // 老版本明文格式：先认下来，下面立即重写
+            }
+        }
+        let st = loaded ?? .empty(pin: ConfigStore.makePin())
+        _license = st
+        if loaded != nil, let body = try? JSONEncoder().encode(st) {
+            defaults.set(LicenseSeal.seal(body), forKey: licenseKey)
         }
         /* 旧版本可能把规则明文存在这里，升级后清掉 */
         defaults.removeObject(forKey: "hm.remotePayload.v1")
@@ -56,8 +71,11 @@ final class ConfigStore {
         lock.lock()
         _license = st
         lock.unlock()
-        if let data = try? JSONEncoder().encode(st) {
-            defaults.set(data, forKey: licenseKey)
+        /* 被调试 / 被注入时只在内存里生效，不写盘：
+           这种环境下读不到能直接复制走的授权数据 */
+        guard Integrity.shared.trustedLocally else { return }
+        if let body = try? JSONEncoder().encode(st) {
+            defaults.set(LicenseSeal.seal(body), forKey: licenseKey)
         }
     }
 
@@ -165,5 +183,38 @@ final class ConfigStore {
             return s
         }
         return Stats()
+    }
+}
+
+/// 本地授权数据的封条
+///
+/// 用主密钥 + 设备码派生 HMAC，覆盖整段 JSON；改一个字节就验不过。
+/// 目的不是加密（内容本来也不敏感），是让「手改 UserDefaults 变成已授权」这条路走不通。
+private enum LicenseSeal {
+
+    private static let magic = Data([0x48, 0x4D, 0x4C, 0x31])   // HML1
+    private static let tagLength = 32
+
+    private static var key: SymmetricKey {
+        let material = AppConfig.secureMasterKey + "|" + ConfigStore.makePin() + "|hm-seal-v1"
+        return SymmetricKey(data: Data(SHA256.hash(data: Data(material.utf8))))
+    }
+
+    static func isSealed(_ blob: Data) -> Bool {
+        blob.count > magic.count + tagLength && blob.prefix(magic.count) == magic
+    }
+
+    static func seal(_ body: Data) -> Data {
+        let tag = Data(HMAC<SHA256>.authenticationCode(for: body, using: key))
+        return magic + body + tag
+    }
+
+    static func open(_ blob: Data) -> Data? {
+        guard isSealed(blob) else { return nil }
+        let body = blob.subdata(in: magic.count..<(blob.count - tagLength))
+        let tag = blob.suffix(tagLength)
+        let expect = Data(HMAC<SHA256>.authenticationCode(for: body, using: key))
+        guard expect == Data(tag) else { return nil }
+        return body
     }
 }

@@ -50,7 +50,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        SecureChannel.post("/auth/check", params: [:], pin: pin) { [weak self] result in
+        SecureChannel.post(Obfs.s(23), params: [:], pin: pin) { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .success(let obj):
@@ -177,7 +177,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func verifyOnce() {
         guard !pin.isEmpty else { return }
-        SecureChannel.post("/auth/check", params: [:], pin: pin) { [weak self] result in
+        SecureChannel.post(Obfs.s(23), params: [:], pin: pin) { [weak self] result in
             guard let self = self else { return }
             guard case .success(let obj) = result else { return }   // 断网不处理
             let ok = (obj["authorized"] as? Bool) ?? false

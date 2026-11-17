@@ -79,6 +79,12 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        /* 先做一次运行环境自检：注入 / 调试 / 改包都会留痕，
+           结论随授权请求一起上报，本地也据此决定授权要不要写盘 */
+        Integrity.shared.evaluate()
+        /* 功能校验的 CRC 组提前在后台算好，别卡在授权请求那一下 */
+        WorkQueue.async { _ = FeatureProbe.all() }
+
         refreshRules()
         refreshLocal()
         loadAnnouncement()

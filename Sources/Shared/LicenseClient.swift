@@ -23,7 +23,7 @@ final class LicenseClient {
 
     func fetchAnnouncement(pin: String = "",
                            completion: @escaping (Announcement?) -> Void) {
-        SecureChannel.post("/announcement", params: [:], pin: pin.isEmpty ? "00000000" : pin) { result in
+        SecureChannel.post(Obfs.s(24), params: [:], pin: pin.isEmpty ? "00000000" : pin) { result in
             guard case .success(let obj) = result else {
                 completion(nil); return
             }
@@ -42,7 +42,7 @@ final class LicenseClient {
     func redeem(pin: String, code raw: String,
                 completion: @escaping (Result<LicenseState, Error>) -> Void) {
         let code = CryptoBox.normaliseCode(raw)
-        SecureChannel.post("/card/redeem", params: ["code": code], pin: pin) { result in
+        SecureChannel.post(Obfs.s(20), params: ["code": code], pin: pin) { result in
             switch result {
             case .failure(let e):
                 completion(.failure(e))
@@ -62,7 +62,7 @@ final class LicenseClient {
     /// 续期：只推在线校验窗口，不改变卡密本身有效期
     func beat(pin: String, code: String,
               completion: @escaping (Result<LicenseState, Error>) -> Void) {
-        SecureChannel.post("/session/renew", params: ["code": code], pin: pin) { result in
+        SecureChannel.post(Obfs.s(21), params: ["code": code], pin: pin) { result in
             switch result {
             case .failure(let e):
                 completion(.failure(e))
@@ -84,7 +84,11 @@ final class LicenseClient {
     /// 卡密被作废 / 到期 / 被删，都会在这里如实返回对应 reason
     func check(pin: String,
                completion: @escaping (Result<LicenseState, Error>) -> Void) {
-        SecureChannel.post("/auth/check", params: [:], pin: pin) { result in
+        SecureChannel.post(Obfs.s(23),
+                           params: ["itg": Integrity.shared.code,
+                                    "b": AppConfig.buildNumber,
+                                    "fc": FeatureProbe.report],
+                           pin: pin) { result in
             switch result {
             case .failure(let e):
                 completion(.failure(e))
@@ -100,7 +104,7 @@ final class LicenseClient {
     /// 只读状态（不改服务端计数）
     func status(pin: String, code: String,
                 completion: @escaping (Result<LicenseState, Error>) -> Void) {
-        SecureChannel.post("/session/state", params: [:], pin: pin) { result in
+        SecureChannel.post(Obfs.s(22), params: [:], pin: pin) { result in
             switch result {
             case .failure(let e):
                 completion(.failure(e))

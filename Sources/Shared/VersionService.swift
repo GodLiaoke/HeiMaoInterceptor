@@ -24,7 +24,7 @@ final class VersionService {
 
         let device = pin.isEmpty ? "00000000" : pin
 
-        SecureChannel.post("/app/version",
+        SecureChannel.post(Obfs.s(25),
                            params: ["platform": "ios", "current": current,
                              "build": AppConfig.buildNumber],
                            pin: device) { result in
