@@ -30,8 +30,9 @@ struct RuleSetsStrip: View {
                     Text(model.ruleSets.isEmpty ? model.ruleSource : model.ruleSets.joined(separator: " · "))
                         .font(.system(size: 10.5, weight: .regular, design: .rounded))
                         .foregroundColor(HK.textFaint)
-                        .lineLimit(1)
+                        .lineLimit(2)
                         .truncationMode(.tail)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 6)

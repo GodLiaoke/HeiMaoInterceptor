@@ -40,7 +40,17 @@ final class RuleService {
 
     private var loading = false
 
-    private init() {}
+    private static let namesKey = "heimao.rule.sets.names"
+    private static let countKey = "heimao.rule.sets.count"
+
+    private init() {
+        /* 上次同步到的规则集名字先顶上，等 manifest 回来再刷新。
+           只存名字和套数，不存规则内容（规则始终只在内存里）。 */
+        if let saved = UserDefaults.standard.array(forKey: RuleService.namesKey) as? [String] {
+            setNames = saved
+        }
+        setCount = UserDefaults.standard.integer(forKey: RuleService.countKey)
+    }
 
     var isLoaded: Bool { text != nil }
 
@@ -96,6 +106,8 @@ final class RuleService {
         setNames = sets
         self.setCount = setCount > 0 ? setCount : sets.count
         setDetails = details
+        UserDefaults.standard.set(sets, forKey: RuleService.namesKey)
+        UserDefaults.standard.set(self.setCount, forKey: RuleService.countKey)
         return set
     }
 
