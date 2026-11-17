@@ -575,6 +575,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// 拦截链路自检：隧道收包 / DNS 查询 / 旁路包 / 路由方案
+    /// 收包一直是 0 = 系统流量没进隧道；DNS 是 0 = DNS 没接管；旁路在涨 = 路由补集没生效
+    var diagText: String {
+        let tunnel = (stats["tunnel"] as? Int) ?? 0
+        let dns = (stats["dns"] as? Int) ?? 0
+        let stray = (stats["stray"] as? Int) ?? 0
+        let routes = (stats["routes"] as? String) ?? "—"
+        return "收包 \(tunnel) · DNS \(dns) · 旁路 \(stray) · \(routes)"
+    }
+
     var blockedText: String { "\((stats["blocked"] as? Int) ?? 0)" }
     var domainText: String { "\((stats["domains"] as? Int) ?? 0)" }
     var tcpText: String { "\((stats["tcp"] as? Int) ?? 0)" }
