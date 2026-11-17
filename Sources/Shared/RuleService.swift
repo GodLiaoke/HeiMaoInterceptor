@@ -117,7 +117,7 @@ final class RuleService {
                     self.text = str
                     self.version = version
                     self.loadedAt = Date()
-                    self.counts = (set.ipRanges.count, set.domains.count)
+                    self.counts = (set.summary.ips, set.domains.count)
                     self.loading = false
 
                     DispatchQueue.main.async {

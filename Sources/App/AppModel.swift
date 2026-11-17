@@ -10,6 +10,19 @@ final class AppModel: ObservableObject {
     @Published var announcement: LicenseClient.Announcement?
     @Published var announcementOpen: Bool = false
     @Published var cloudNotice: String?
+
+    /// 云端公告拉不到时的兜底：主界面必须永远有公告位，不能空白
+    static let builtinNotice = LicenseClient.Announcement(
+        title: "欢迎使用黑猫公益拦截",
+        content: "1. 首次使用请到「设置」输入卡密激活；激活后主界面会显示到期时间和规则版本。\n2. 开启后只接管规则命中范围内的连接，正常上网不受影响。\n3. 卡密到期或被作废时，防护会自动关闭，界面会明确提示原因。\n4. 有问题或需要续期，请到公益频道 @HeiMaoClub 反馈。",
+        updatedAt: "")
+
+    /// 主界面公告位实际展示的内容（云端优先）
+    var displayNotice: LicenseClient.Announcement {
+        if let a = announcement, !(a.content.isEmpty && a.title.isEmpty) { return a }
+        return AppModel.builtinNotice
+    }
+
     @Published var stats: [String: Any] = [:]
     @Published var ruleCounts: (ips: Int, domains: Int) = (0, 0)
     @Published var ruleSource: String = "未加载"
@@ -79,7 +92,7 @@ final class AppModel: ObservableObject {
 
     func refreshRules() {
         let set = ConfigStore.shared.currentRuleSet()
-        ruleCounts = (set.ipRanges.count, set.domains.count)
+        ruleCounts = (set.summary.ips, set.domains.count)
         ruleSource = ConfigStore.shared.rulesSourceLabel
         cloudNotice = ConfigStore.shared.cloudNotice
     }

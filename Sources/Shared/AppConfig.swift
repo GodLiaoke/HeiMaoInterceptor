@@ -5,7 +5,7 @@ enum AppConfig {
 
     static let appName        = "黑猫公益拦截"
     static let appVersion     = "1.0"
-    static let buildNumber    = 101          // 1.0 补充更新（授权判定 / 加密通道 / 公告）
+    static let buildNumber    = 102          // 1.0 build102（签名路径修复 / 界面重做 / 规则引擎）
     static let apiBase        = "https://ios.ouovo.cc/api"
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"

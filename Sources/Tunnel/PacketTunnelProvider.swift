@@ -92,7 +92,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func begin(rulesText: String,
                        conf: [String: Any],
                        completionHandler: @escaping (Error?) -> Void) {
-        ruleSet = RuleSet.parse(text: rulesText)
+        let parsed = RuleSet.parse(text: rulesText)
+        /* 规则一条都没解析出来就别开隧道：开了也拦不住任何东西，
+           反而让用户以为防护生效了。 */
+        guard !parsed.isEmpty else {
+            completionHandler(TunnelError.ruleSetEmpty)
+            return
+        }
+        ruleSet = parsed
         dnsIP = (conf["dnsIP"] as? String) ?? AppConfig.dnsProxyIP
         clientIP = (conf["clientIP"] as? String) ?? AppConfig.clientIP
         let mtu = (conf["mtu"] as? Int) ?? AppConfig.mtu
@@ -184,6 +191,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             var payload = engine?.snapshot() ?? [:]
             payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
             payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
+            payload["ruleReport"] = [
+                "ips": ruleSet.report.exactIPs + ruleSet.report.cidrs,
+                "domains": ruleSet.report.domains,
+                "direct": ruleSet.report.direct,
+                "ports": ruleSet.report.ports,
+                "skipped": ruleSet.report.skipped,
+            ]
             let data = try? JSONSerialization.data(withJSONObject: payload)
             completionHandler?(data)
             return
@@ -198,6 +212,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         if cmd.hasPrefix("rules:") {
             let text = String(cmd.dropFirst(6))
             let newRules = RuleSet.parse(text: text)
+            /* 热更新失败时保留旧规则，不要因为一次坏包把防护清空 */
+            guard !newRules.isEmpty else {
+                completionHandler?(Data("reject".utf8))
+                return
+            }
             ruleSet = newRules
             engine?.update(rules: newRules)
             completionHandler?(Data("ok".utf8))
@@ -224,6 +243,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         case missingConfiguration
         case licenseExpired
         case configExpired
+        case ruleSetEmpty
         case licenseInvalid(String)
 
         var errorDescription: String? {
@@ -234,6 +254,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return "卡密已到期，请续费后重试"
             case .configExpired:
                 return "授权配置已过期，请重新激活"
+            case .ruleSetEmpty:
+                return "云端规则为空，请稍后重试"
             case .licenseInvalid(let reason):
                 switch reason {
                 case "card_revoked":   return "卡密已被作废，防护无法开启"

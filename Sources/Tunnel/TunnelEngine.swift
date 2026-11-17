@@ -88,7 +88,7 @@ final class TunnelEngine {
                 handleDNS(p)
                 return
             }
-            if isBlocked(p.dstIP) {
+            if isBlocked(p.dstIP, port: udp.dstPort) {
                 stateQueue.async {
                     self.stats.blockedPackets += 1
                     self.stats.blockedUDP += 1
@@ -98,8 +98,8 @@ final class TunnelEngine {
             return
         }
 
-        if p.proto == 6, p.tcp != nil {
-            if isBlocked(p.dstIP) {
+        if p.proto == 6, let tcp = p.tcp {
+            if isBlocked(p.dstIP, port: tcp.dstPort) {
                 if let rst = PacketCodec.buildRST(for: p) {
                     write([rst])
                 }
@@ -112,8 +112,13 @@ final class TunnelEngine {
         }
     }
 
-    private func isBlocked(_ ip: UInt32) -> Bool {
-        stateQueue.sync { rules.isIPBlocked(ip) }
+    /// IP + 端口一起判定（一次加锁，避免每个包锁两次）
+    ///
+    /// 端口规则的语义：
+    ///   - 规则库里有 IP 时，命中 IP 就拦，端口只是附加信息，不额外限制；
+    ///   - 规则库只有端口（纯端口黑名单）时，按目标端口拦。
+    private func isBlocked(_ ip: UInt32, port: UInt16) -> Bool {
+        stateQueue.sync { rules.shouldBlock(ip: ip, port: port) }
     }
 
     // MARK: - DNS

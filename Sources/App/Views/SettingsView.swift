@@ -52,53 +52,35 @@ struct SettingsView: View {
         .padding(.bottom, 4)
     }
 
-    // MARK: - 公告（置顶）
+    // MARK: - 公告（主界面已展示，这里只留刷新入口）
 
     private var announcementCard: some View {
-        VStack(spacing: 9) {
-            SectionHeader(title: "公告", subtitle: "NOTICE")
-            if let ann = model.announcement, !(ann.content.isEmpty && ann.title.isEmpty) {
-                GlassCard(padding: 16, corner: 20) {
-                    VStack(alignment: .leading, spacing: 9) {
-                        HStack(spacing: 7) {
-                            Image(systemName: "megaphone.fill")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundColor(HK.amber)
-                            Text(ann.title.isEmpty ? "最新公告" : ann.title)
-                                .font(.system(size: 13.5, weight: .semibold, design: .rounded))
-                                .foregroundColor(HK.text)
-                            Spacer()
-                        }
-                        Text(ann.content)
-                            .font(.system(size: 12.5, weight: .regular, design: .rounded))
-                            .foregroundColor(HK.textDim)
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if !ann.updatedAt.isEmpty {
-                            Text("更新于 \(MainView.prettyTime(ann.updatedAt))")
-                                .font(.system(size: 10, weight: .regular, design: .rounded))
-                                .foregroundColor(HK.textFaint)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+        GlassCard(padding: 14, corner: 18) {
+            HStack(spacing: 10) {
+                Image(systemName: "megaphone.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(HK.amber)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("公告在主界面顶部")
+                        .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                        .foregroundColor(HK.text)
+                    Text(model.displayNotice.title)
+                        .font(.system(size: 11, weight: .regular, design: .rounded))
+                        .foregroundColor(HK.textFaint)
+                        .lineLimit(1)
                 }
-            } else {
-                GlassCard(padding: 16, corner: 20) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "megaphone")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(HK.textFaint)
-                        Text("暂无公告")
-                            .font(.system(size: 12.5, design: .rounded))
-                            .foregroundColor(HK.textFaint)
-                        Spacer()
-                        Button { model.loadAnnouncement() } label: {
-                            Text("刷新")
-                                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                                .foregroundColor(HK.cyan)
-                        }
+                Spacer()
+                Button {
+                    model.loadAnnouncement()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+                        model.toast = "公告已刷新"
                     }
+                } label: {
+                    Text("刷新")
+                        .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        .foregroundColor(HK.cyan)
                 }
+                .buttonStyle(.plain)
             }
         }
     }

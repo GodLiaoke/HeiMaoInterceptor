@@ -137,8 +137,17 @@ final class SecureV3
 
         $msg = 'v3|' . $path . '|' . $pin . '|' . $ts . '|' . $n . '|' . hash('sha256', $e);
         if (!hash_equals(self::sign($msg), $sig)) {
-            Log::file('secure', 'v3 bad sig path=' . $path . ' pin=' . $pin);
-            self::reject('bad_signature');
+            /*
+             * 兼容历史客户端：早期版本签名串里带了前导斜杠
+             * （"v3|/session/renew|…"），而这里 trim 之后是 "session/renew"。
+             * 两种形态都接受，避免老包全线 400；签名强度不变——
+             * 攻击者既改不了路径也改不了 ts/nonce，两种拼法都得有主密钥才能算出来。
+             */
+            $alt = 'v3|/' . $path . '|' . $pin . '|' . $ts . '|' . $n . '|' . hash('sha256', $e);
+            if (!hash_equals(self::sign($alt), $sig)) {
+                Log::file('secure', 'v3 bad sig path=' . $path . ' pin=' . $pin);
+                self::reject('bad_signature');
+            }
         }
 
         $nonceBin = hex2bin($n);

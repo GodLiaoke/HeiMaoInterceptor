@@ -72,7 +72,15 @@ enum SecureChannel {
             completion(.failure(Failure.server("设备码异常，请重装应用")))
             return
         }
-        guard let url = URL(string: AppConfig.apiBase + "/" + path) else {
+
+        // 路径必须和签名串逐字一致。
+        // 服务端会 trim 掉首尾斜杠再验签，如果这里带着 "/announcement"，
+        // 两端拼出来的签名串就不同，会被判成签名无效（旧版「请检查手机时间」的真凶）。
+        let route = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !route.isEmpty else {
+            completion(.failure(Failure.badPayload)); return
+        }
+        guard let url = URL(string: AppConfig.apiBase + "/" + route) else {
             completion(.failure(Failure.network)); return
         }
 
@@ -97,7 +105,7 @@ enum SecureChannel {
             completion(.failure(Failure.crypto)); return
         }
 
-        let sigMsg = "v3|\(path)|\(pin)|\(ts)|\(nonceHex)|\(sha256Hex(sealed))"
+        let sigMsg = "v3|\(route)|\(pin)|\(ts)|\(nonceHex)|\(sha256Hex(sealed))"
         let sig = hmacHex(sigMsg)
 
         let envelope: [String: Any] = [
@@ -187,9 +195,13 @@ enum SecureChannel {
     /// 服务端错误码 → 人话
     static func friendly(_ code: String) -> String {
         switch code.lowercased() {
-        case "bad_signature", "bad_cipher", "bad_envelope", "bad_nonce",
-             "stale_request", "replay":
-            return "安全校验未通过，请检查手机时间是否准确后重试"
+        case "stale_request":
+            // 真的是请求时间戳超出窗口
+            return "请求已过期，请检查手机时间是否为「自动设置」后重试"
+        case "bad_signature", "bad_cipher", "bad_envelope", "bad_nonce":
+            return "安全校验未通过，请更新到最新版本后重试"
+        case "replay":
+            return "请求重复提交了，请再点一次"
         case "rate_limited":  return "请求太频繁，稍后再试"
         case "bad_pin":       return "设备码异常，请重装应用"
         case "card_format":   return "卡密格式不对，请检查有没有输错"
