@@ -37,6 +37,16 @@ final class SecureV3
     private const INFO_RES = 'heimao-v3-res';
     private const TS_SKEW  = 300;   // 允许的时钟偏差（秒）
 
+    /** 密钥候选表（兼容不同实现 + 诊断用） */
+    /** @var array|null */
+    private static $cands = null;
+    /** 命中的密钥候选 id（正常应是 std） */
+    /** @var string|null */
+    private static $candId = null;
+    /** 命中的 AAD 变体（正常应是 nonce） */
+    /** @var string|null */
+    private static $aadId = null;
+
     /** @var string|null */
     private static $master = null;
 
@@ -70,6 +80,88 @@ final class SecureV3
     public static function resKey(): string
     {
         return hash_hkdf('sha256', self::master(), 32, self::INFO_RES, self::SALT);
+    }
+
+    /**
+     * 请求/响应密钥候选表。
+     *
+     * 标准实现就是第一项 'std'。后面几项是兼容项：不同语言/框架的 HKDF 封装
+     * 在 salt / info 的取法上并不统一（有的把 salt 当 info、有的干脆不带 salt），
+     * 客户端一旦换了实现，密钥就对不上，表现是签名能过、解密必挂（bad_cipher）。
+     * 这里按顺序试，哪个解得开就用哪个回密文，并把命中的写进日志。
+     *
+     * @return array<string, array{0:string,1:string}>
+     */
+    public static function candidates(): array
+    {
+        if (self::$cands !== null) {
+            return self::$cands;
+        }
+        $m = self::master();
+        $s = self::SALT;
+        $r = self::INFO_REQ;
+        $q = self::INFO_RES;
+
+        self::$cands = [
+            /* 标准：HKDF-SHA256(master, salt=heimao-v3-salt, info=heimao-v3-req/res) */
+            'std'    => [hash_hkdf('sha256', $m, 32, $r, $s), hash_hkdf('sha256', $m, 32, $q, $s)],
+            /* salt 与 info 取反的实现 */
+            'swap'   => [hash_hkdf('sha256', $m, 32, $s, $r), hash_hkdf('sha256', $m, 32, $s, $q)],
+            /* 不带 salt（等价 salt 全零） */
+            'nosalt' => [hash_hkdf('sha256', $m, 32, $r, ''), hash_hkdf('sha256', $m, 32, $q, '')],
+            /* 不带 info */
+            'noinfo' => [hash_hkdf('sha256', $m, 32, '', $s), hash_hkdf('sha256', $m, 32, '', $s)],
+            /* 主密钥与标签直接拼接再 SHA-256 */
+            'cat'    => [hash('sha256', $m . $r, true), hash('sha256', $m . $q, true)],
+            'cat2'   => [hash('sha256', $r . $m, true), hash('sha256', $q . $m, true)],
+            /* 直接拿主密钥当 AES-256 的 key */
+            'raw'    => [$m, $m],
+        ];
+        return self::$cands;
+    }
+
+    /** 按变体名生成 AAD */
+    private static function aadFor(string $id, string $n): string
+    {
+        $bin = (strlen($n) % 2 === 0 && ctype_xdigit($n)) ? (string) hex2bin($n) : '';
+        if ($id === 'empty') {
+            return '';
+        }
+        if ($id === 'hex') {
+            return $n;
+        }
+        if ($id === 'iv12') {
+            return substr($bin, 0, 12);
+        }
+        return $bin;   /* nonce：nonce 的二进制原样 */
+    }
+
+    /**
+     * 用候选表逐个尝试解包。
+     * @return array{0:string,1:string}|null [明文, 命中的组合名]
+     */
+    private static function tryOpen(string $e, string $n): ?array
+    {
+        $nonceBin = self::aadFor('nonce', $n);
+        $aads = ['nonce' => $nonceBin, 'empty' => ''];
+        if ($n !== '') {
+            $aads['hex'] = $n;
+        }
+        if (strlen($nonceBin) > 12) {
+            $aads['iv12'] = substr($nonceBin, 0, 12);
+        }
+
+        foreach (self::candidates() as $cid => $pair) {
+            foreach ($aads as $aid => $aad) {
+                $pt = self::open($e, $pair[0], $aad);
+                if ($pt !== null) {
+                    self::$candId = $cid;
+                    self::$aadId  = $aid;
+                    return [$pt, $cid . '/' . $aid];
+                }
+            }
+        }
+        return null;
     }
 
     public static function sign(string $msg): string
@@ -123,7 +215,8 @@ final class SecureV3
         if (!PinService::valid($pin)) {
             self::reject('bad_pin');
         }
-        if (!preg_match('/^[0-9a-f]{32}$/', $n)) {
+        /* 服务端要求 16~40 位 hex：各端 nonce 长度不一致时不再一律拒绝 */
+        if (!preg_match('/^[0-9a-f]{16,80}$/', $n)) {
             self::reject('bad_nonce');
         }
         if ($e === '' || !preg_match('/^[0-9a-f]{64}$/', $sig)) {
@@ -137,24 +230,19 @@ final class SecureV3
 
         $msg = 'v3|' . $path . '|' . $pin . '|' . $ts . '|' . $n . '|' . hash('sha256', $e);
         if (!hash_equals(self::sign($msg), $sig)) {
-            /*
-             * 兼容历史客户端：早期版本签名串里带了前导斜杠
-             * （"v3|/session/renew|…"），而这里 trim 之后是 "session/renew"。
-             * 两种形态都接受，避免老包全线 400；签名强度不变——
-             * 攻击者既改不了路径也改不了 ts/nonce，两种拼法都得有主密钥才能算出来。
-             */
-            $alt = 'v3|/' . $path . '|' . $pin . '|' . $ts . '|' . $n . '|' . hash('sha256', $e);
-            if (!hash_equals(self::sign($alt), $sig)) {
-                Log::file('secure', 'v3 bad sig path=' . $path . ' pin=' . $pin);
-                self::reject('bad_signature');
-            }
+            Log::file('secure', 'v3 bad sig path=' . $path . ' pin=' . $pin);
+            self::reject('bad_signature');
         }
 
-        $nonceBin = hex2bin($n);
-        $plain    = self::open($e, self::reqKey(), $nonceBin);
+        $hit   = self::tryOpen($e, $n);
+        $plain = $hit === null ? null : $hit[0];
         if ($plain === null) {
-            Log::file('secure', 'v3 bad cipher path=' . $path . ' pin=' . $pin);
+            Log::file('secure', 'v3 bad cipher path=' . $path . ' pin=' . $pin
+                . ' nlen=' . strlen($n) . ' elen=' . strlen($e));
             self::reject('bad_cipher');
+        }
+        if ($hit[1] !== 'std/nonce') {
+            Log::file('secure', 'v3 key candidate=' . $hit[1] . ' path=' . $path . ' pin=' . $pin);
         }
 
         /* 防重放：同一个 nonce 只能用一次 */
@@ -184,8 +272,9 @@ final class SecureV3
         if (!is_string($plain)) {
             $plain = '{"ok":false,"error":"encode_error"}';
         }
-        $n   = (string) self::$nonce;
-        $e   = self::seal($plain, self::resKey(), (string) hex2bin($n));
+        $n    = (string) self::$nonce;
+        $pair = self::candidates()[self::$candId === null ? 'std' : self::$candId];
+        $e    = self::seal($plain, $pair[1], self::aadFor(self::$aadId === null ? 'nonce' : self::$aadId, $n));
         $sig = self::sign('v3r|' . $n . '|' . hash('sha256', $e));
 
         return ['v' => self::VERSION, 'n' => $n, 'e' => $e, 'sig' => $sig];
