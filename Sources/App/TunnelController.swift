@@ -84,9 +84,10 @@ final class TunnelController: ObservableObject {
 
             manager.saveToPreferences { error in
                 if let error = error {
+                    let friendly = TunnelController.explain(error)
                     DispatchQueue.main.async {
-                        self.lastError = error.localizedDescription
-                        completion(.failure(error))
+                        self.lastError = friendly.localizedDescription
+                        completion(.failure(friendly))
                     }
                     return
                 }
@@ -112,6 +113,37 @@ final class TunnelController: ObservableObject {
     func stop() {
         manager?.connection.stopVPNTunnel()
         DispatchQueue.main.async { self.status = .disconnected }
+    }
+
+    /// 把系统给的干巴巴错误码翻成用户能照着做的提示
+    ///
+    /// 签名不完整（尤其是扩展没签上）时，系统只会甩一句 permission denied，
+    /// 用户完全不知道该干嘛。这里按错误内容给出具体动作。
+    static func explain(_ error: Error) -> Error {
+        let ns = error as NSError
+        let raw = ns.localizedDescription.lowercased()
+
+        if raw.contains("permission") || raw.contains("entitled")
+            || raw.contains("entitlement") || raw.contains("code sign")
+            || raw.contains("codesign") || raw.contains("not valid") {
+            return LicenseError.badResponse(
+                "系统拒绝了隧道权限：安装包签名不完整。用巨魔的请装 TrollStore 专用包，用 ESign / 爱思的请把主程序和扩展一起签。")
+        }
+
+        if ns.domain == NEVPNErrorDomain {
+            switch ns.code {
+            case NEVPNError.configurationInvalid.rawValue,
+                 NEVPNError.configurationReadWriteFailed.rawValue:
+                return LicenseError.badResponse("VPN 配置写入失败，通常是签名或权限问题，重装一次安装包再试。")
+            case NEVPNError.configurationDisabled.rawValue:
+                return LicenseError.badResponse("VPN 配置被系统停用，去「设置 - 通用 - VPN 与设备管理」里删掉旧配置再开。")
+            case NEVPNError.connectionFailed.rawValue:
+                return LicenseError.badResponse("隧道启动失败，检查卡密状态后重试。")
+            default:
+                break
+            }
+        }
+        return error
     }
 
     /// 规则热更新：把新规则推给扩展
