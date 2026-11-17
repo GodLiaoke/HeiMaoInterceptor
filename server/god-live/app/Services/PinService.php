@@ -16,19 +16,36 @@ final class PinService
         return (bool) preg_match('/^\d{' . $len . '}$/', $pin);
     }
 
-    /** 记录一次访问（首次访问自动登记） */
+    /**
+     * 记录一次访问（首次访问自动登记）
+     *
+     * 节流：同一个配对码 60 秒内只写一次 last_seen。
+     * 客户端每几秒就轮询一次，如果每次都 UPDATE，
+     * 高并发下 SQLite 会被这些无意义的写锁顶满。
+     */
     public static function touch(string $pin, string $ip, string $ua): void
     {
         $pdo = Database::pdo();
         $now = time();
-        $st = $pdo->prepare('SELECT pin FROM pins WHERE pin = ?');
-        $st->execute([$pin]);
-        if ($st->fetchColumn()) {
-            $pdo->prepare('UPDATE pins SET last_seen = ?, ip = ? WHERE pin = ?')
-                ->execute([$now, $ip, $pin]);
-        } else {
-            $pdo->prepare('INSERT INTO pins(pin, first_seen, last_seen, ip, ua) VALUES(?,?,?,?,?)')
+        try {
+            $upd = $pdo->prepare(
+                'UPDATE pins SET last_seen = ?, ip = ?
+                 WHERE pin = ? AND (last_seen IS NULL OR last_seen < ?)'
+            );
+            $upd->execute([$now, $ip, $pin, $now - 60]);
+            if ($upd->rowCount() > 0) {
+                return;
+            }
+            /* 可能是新设备，也可能是刚更新过：查一下到底在不在 */
+            $st = $pdo->prepare('SELECT 1 FROM pins WHERE pin = ?');
+            $st->execute([$pin]);
+            if ($st->fetchColumn()) {
+                return;
+            }
+            $pdo->prepare('INSERT OR IGNORE INTO pins(pin, first_seen, last_seen, ip, ua) VALUES(?,?,?,?,?)')
                 ->execute([$pin, $now, $now, $ip, $ua]);
+        } catch (Throwable $e) {
+            Log::file('app', 'pin touch: ' . $e->getMessage());
         }
     }
 
