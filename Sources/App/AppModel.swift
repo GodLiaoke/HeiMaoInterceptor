@@ -37,7 +37,14 @@ final class AppModel: ObservableObject {
 
     @Published var stats: [String: Any] = [:]
     @Published var ruleCounts: (ips: Int, domains: Int) = (0, 0)
+    @Published var rulePorts: Int = 0
     @Published var ruleSource: String = "未加载"
+    /// 后台勾选下发的那几套规则（名称来自 manifest）
+    @Published var ruleSets: [String] = []
+    @Published var ruleSetCount: Int = 0
+    @Published var ruleSetDetails: [[String: Any]] = []
+    @Published var ruleVersionText: String = "未加载"
+    @Published var ruleUpdatedAt: Date?
     @Published var rulesLoading: Bool = false
     @Published var rulesError: String?
 
@@ -110,9 +117,16 @@ final class AppModel: ObservableObject {
     // MARK: - 规则
 
     func refreshRules() {
-        let set = RuleService.shared.currentSet
+        let rs = RuleService.shared
+        let set = rs.currentSet
         ruleCounts = (set.summary.ips, set.domains.count)
+        rulePorts = set.report.ports
         ruleSource = ConfigStore.shared.rulesSourceLabel
+        ruleSets = rs.setNames
+        ruleSetCount = rs.setCount > 0 ? rs.setCount : rs.setNames.count
+        ruleSetDetails = rs.setDetails
+        ruleVersionText = rs.versionText
+        ruleUpdatedAt = rs.loadedAt
         cloudNotice = ConfigStore.shared.cloudNotice
     }
 
@@ -144,7 +158,10 @@ final class AppModel: ObservableObject {
                 }
                 if force {
                     let c = self.ruleCounts
-                    self.publishResult("规则已更新 · \(self.ruleSource)（IP \(c.ips) / 域名 \(c.domains)）")
+                    var detail = "IP \(c.ips) / 域名 \(c.domains)"
+                    if self.rulePorts > 0 { detail += " / 端口 \(self.rulePorts)" }
+                    let sets = self.ruleSets.isEmpty ? "" : " · \(self.ruleSetCount) 套：\(self.ruleSets.joined(separator: " / "))"
+                    self.publishResult("规则已更新\(sets)（\(detail)）")
                 }
             case .failure(let err):
                 self.rulesError = err.localizedDescription

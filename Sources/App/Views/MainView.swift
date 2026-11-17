@@ -7,6 +7,7 @@ struct MainView: View {
 
     @EnvironmentObject var model: AppModel
     @State private var showSettings = false
+    @State private var showRules = false
     @State private var appear = false
 
     var body: some View {
@@ -49,6 +50,8 @@ struct MainView: View {
 
                     quickStats
 
+                    RuleSetsStrip { showRules = true }
+
                     licenseCard
                     statsSection
                     channelCard
@@ -78,6 +81,9 @@ struct MainView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model)
+        }
+        .sheet(isPresented: $showRules) {
+            RulesDetailView().environmentObject(model)
         }
         // 设置里点了刷新：收起设置页，结果在主界面顶部看
         .onReceive(model.$closeSettingsRequest.compactMap { $0 }) { _ in
@@ -234,7 +240,7 @@ struct MainView: View {
         HStack(spacing: 10) {
             MiniStat(value: model.blockedText, label: "拦截", tint: HK.cyan, icon: "shield.fill")
             MiniStat(value: model.domainText, label: "域名", tint: HK.violet, icon: "globe")
-            MiniStat(value: "\(model.ruleCounts.ips + model.ruleCounts.domains)",
+            MiniStat(value: "\(model.ruleCounts.ips + model.ruleCounts.domains + model.rulePorts)",
                      label: "规则", tint: HK.mint, icon: "list.bullet")
         }
     }
@@ -283,8 +289,7 @@ struct MainView: View {
                         }
                     } else {
                         GlassButton(title: "规则详情", icon: "list.bullet.rectangle", tint: HK.violet) {
-                            model.loadRules(force: false)
-                            model.toast = model.rulesError ?? "规则已是最新 · v\(RuleService.shared.version)"
+                            showRules = true
                         }
                     }
                 }

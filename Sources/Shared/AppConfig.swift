@@ -4,8 +4,8 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
-    static let appVersion     = "1.0.2"
-    static let buildNumber    = 104          // 1.0.2 build104（加密通道密钥候选自动重试 / 服务端兼容层）
+    static let appVersion     = "1.0.3"
+    static let buildNumber    = 105          // 1.0.3 build105（多套规则集名称下发 / 规则详情 / UI 优化）
     static let apiBase        = "https://ios.ouovo.cc/api"
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"

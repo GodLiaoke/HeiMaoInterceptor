@@ -113,9 +113,14 @@ final class ConfigStore {
     }
 
     var rulesSourceLabel: String {
-        let v = RuleService.shared.version
-        return v.isEmpty ? "未加载" : "云端下发 · v\(v)"
+        let rs = RuleService.shared
+        if !rs.isLoaded { return "未加载" }
+        let n = rs.setCount > 0 ? rs.setCount : rs.setNames.count
+        if n >= 2 { return "云端下发 · \(n) 套规则" }
+        return rs.setNames.first.map { "云端下发 · \($0)" } ?? "云端下发"
     }
+
+    var rulesSetsLabel: String { RuleService.shared.setsText }
 
     var rulesVersion: String { RuleService.shared.version }
 

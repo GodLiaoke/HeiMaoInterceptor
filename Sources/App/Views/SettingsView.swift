@@ -216,8 +216,20 @@ struct SettingsView: View {
             GlassCard {
                 VStack(spacing: 12) {
                     InfoRow(title: "来源", value: model.ruleSource)
+                    InfoRow(title: "规则集", value: model.ruleSetCount > 0 ? "\(model.ruleSetCount) 套" : "—")
+                    if !model.ruleSets.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("下发内容")
+                                .font(.system(size: 11, weight: .regular, design: .rounded))
+                                .foregroundColor(HK.textFaint)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            FlowChips(items: model.ruleSets)
+                        }
+                    }
                     InfoRow(title: "IP 规则", value: "\(model.ruleCounts.ips) 条")
                     InfoRow(title: "域名规则", value: "\(model.ruleCounts.domains) 条")
+                    InfoRow(title: "端口规则", value: "\(model.rulePorts) 条")
+                    InfoRow(title: "下发版本", value: model.ruleVersionText, mono: true)
                     DividerLine()
                     HStack(spacing: 10) {
                         Button {
@@ -335,6 +347,52 @@ extension View {
     }
 }
 
+
+// MARK: - 规则集名称小标签
+
+/// 自动换行的标签流；规则集名字长短不一，单行放不下就往下折
+struct FlowChips: View {
+    let items: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 6) {
+                    ForEach(row, id: \.self) { name in
+                        Text(name)
+                            .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                            .foregroundColor(HK.violet)
+                            .lineLimit(1)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(HK.violet.opacity(0.13))
+                                            .overlay(Capsule().stroke(HK.violet.opacity(0.28), lineWidth: 0.7)))
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    /// 按字数粗略折行，iOS 15 没有 Layout 协议，手动分组最稳
+    private var rows: [[String]] {
+        var out: [[String]] = []
+        var current: [String] = []
+        var width = 0
+        for name in items {
+            let w = name.count + 2
+            if width + w > 18, !current.isEmpty {
+                out.append(current)
+                current = []
+                width = 0
+            }
+            current.append(name)
+            width += w
+        }
+        if !current.isEmpty { out.append(current) }
+        return out
+    }
+}
 
 // MARK: - HTTPS 说明行
 
