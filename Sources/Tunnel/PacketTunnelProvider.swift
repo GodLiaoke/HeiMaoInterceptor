@@ -17,27 +17,44 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // 1. 授权时效：卡密到期 / 配置包到期 任一过期即拒绝启动
+        // 1. 卡密到期时间（不是在线窗口，窗口过期由 App 每 60 秒续）
         let now = Date().timeIntervalSince1970
         let expireAt = (conf["expireAt"] as? Double) ?? 0
-        let configExpire = (conf["configExpire"] as? Double) ?? 0
         if expireAt > 0 && expireAt < now {
             completionHandler(TunnelError.licenseExpired)
             return
         }
-        if configExpire > 0 && configExpire < now {
-            completionHandler(TunnelError.configExpired)
+
+        // 2. 规则：App 传进来的是已经解密好的内存文本
+        let rulesText = (conf["rulesText"] as? String) ?? ""
+        if !rulesText.isEmpty {
+            begin(rulesText: rulesText, conf: conf, completionHandler: completionHandler)
             return
         }
 
-        // 2. 规则
-        let rulesText = (conf["rulesText"] as? String) ?? ""
+        // 3. 兜底：扩展自己向云端取（同样需要有效卡密）
+        let pin = (conf["pin"] as? String) ?? ""
+        let code = (conf["code"] as? String) ?? ""
+        RuleService.shared.load(pin: pin, code: code, force: false) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let text):
+                self.begin(rulesText: text, conf: conf, completionHandler: completionHandler)
+            case .failure(let err):
+                completionHandler(err)
+            }
+        }
+    }
+
+    private func begin(rulesText: String,
+                       conf: [String: Any],
+                       completionHandler: @escaping (Error?) -> Void) {
         ruleSet = RuleSet.parse(text: rulesText)
         dnsIP = (conf["dnsIP"] as? String) ?? AppConfig.dnsProxyIP
         clientIP = (conf["clientIP"] as? String) ?? AppConfig.clientIP
         let mtu = (conf["mtu"] as? Int) ?? AppConfig.mtu
 
-        // 3. 隧道网络参数：只接管规则 IP + DNS 代理地址，其它流量不碰
+        // 隧道网络参数：只接管规则 IP + DNS 代理地址，其它流量不碰
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: dnsIP)
         settings.mtu = NSNumber(value: mtu)
 
@@ -57,7 +74,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.ipv4Settings = ipv4
 
         let dns = NEDNSSettings(servers: [dnsIP])
-        dns.matchDomains = [""]           // 接管全部 DNS，命中再黑洞
+        dns.matchDomains = [""]
         settings.dnsSettings = dns
 
         setTunnelNetworkSettings(settings) { [weak self] error in
@@ -120,7 +137,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             parts.append(String(value & 0xFF))
             value >>= 8
         }
-        // 上面是从低字节取的，拼回来需要反向
         return parts.reversed().joined(separator: ".")
     }
 

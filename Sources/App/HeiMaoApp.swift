@@ -16,8 +16,9 @@ struct HeiMaoApp: App {
                         model.refreshLocal()
                         model.loadAnnouncement()
                         model.pollStats()
+                        model.checkUpdate()
                         // 回到前台随手心跳一次，拿到最新时效
-                        if model.license.authorized {
+                        if model.authorized {
                             model.refreshLicense(silent: true)
                         }
                     }

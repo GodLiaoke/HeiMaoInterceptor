@@ -1,24 +1,23 @@
 import Foundation
 
-/// 服务端授权/公告通道
+/// 服务端授权 / 公告通道
 /// 对接端点（ios.ouovo.cc）：
 ///   GET  /api/announcement
-///   GET  /api/pin/status?pin=
-///   POST /api/pin/beat       {pin}
-///   POST /api/card/redeem    {pin, code}
+///   POST /api/card/redeem      兑换 / 绑定卡密
+///   POST /api/session/renew    续期（只推在线校验窗口）
+///   GET  /api/session/state    只读状态
 final class LicenseClient {
 
     static let shared = LicenseClient()
 
     private let session: URLSession
-    private let decoder = JSONDecoder()
 
     init() {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 12
         cfg.timeoutIntervalForResource = 20
         cfg.httpAdditionalHeaders = ["Accept": "application/json",
-                                     "User-Agent": "HeiMaoInterceptor/1.0 (iOS)"]
+                                     "User-Agent": "HeiMaoInterceptor/\(AppConfig.appVersion) (iOS)"]
         session = URLSession(configuration: cfg)
     }
 
@@ -50,98 +49,90 @@ final class LicenseClient {
 
     // MARK: - 授权
 
-    /// 兑换卡密（首次激活）
-    func redeem(pin: String, code: String,
+    /// 兑换卡密（首次激活 / 同设备再次兑换）
+    func redeem(pin: String, code raw: String,
                 completion: @escaping (Result<LicenseState, Error>) -> Void) {
+        let code = CryptoBox.normaliseCode(raw)
         post(path: "/card/redeem", body: ["pin": pin, "code": code]) { result in
             switch result {
             case .failure(let e):
                 completion(.failure(e))
             case .success(let obj):
                 guard (obj["ok"] as? Bool) == true else {
-                    let err = (obj["error"] as? String) ?? ""
-                    completion(.failure(self.mapError(err)))
+                    let raw = (obj["error"] as? String) ?? ""
+                    completion(.failure(self.mapError(raw)))
                     return
                 }
                 var st = LicenseState.empty(pin: pin)
-                st.code = code.uppercased()
-                st.authorized = true
-                st.lastCheck = Date()
-                if let exp = self.num(obj["expire_at"]) {
-                    st.expireAt = Date(timeIntervalSince1970: exp)
-                } else if let insec = self.num(obj["expires_in"]) {
-                    st.expireAt = Date().addingTimeInterval(insec)
-                }
-                self.applyEnvelope(obj, into: &st)
+                st.code = code
+                self.apply(obj, into: &st)
                 completion(.success(st))
             }
         }
     }
 
-    /// 心跳 / 状态查询
+    /// 续期：只推在线校验窗口，不改变卡密本身有效期
+    func beat(pin: String, code: String,
+              completion: @escaping (Result<LicenseState, Error>) -> Void) {
+        post(path: "/session/renew", body: ["pin": pin, "code": code]) { result in
+            switch result {
+            case .failure(let e):
+                completion(.failure(e))
+            case .success(let obj):
+                guard (obj["ok"] as? Bool) == true else {
+                    let raw = (obj["error"] as? String) ?? ""
+                    completion(.failure(self.mapError(raw)))
+                    return
+                }
+                var st = LicenseState.empty(pin: pin)
+                st.code = code
+                self.apply(obj, into: &st)
+                completion(.success(st))
+            }
+        }
+    }
+
+    /// 只读状态（不改服务端计数）
     func status(pin: String, code: String,
                 completion: @escaping (Result<LicenseState, Error>) -> Void) {
-        var url = AppConfig.apiBase + "/pin/status?pin=" + (pin.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? pin)
-        if !code.isEmpty {
-            url += "&code=" + (code.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? code)
-        }
-        guard let u = URL(string: url) else {
+        var comps = URLComponents(string: AppConfig.apiBase + "/session/state")
+        comps?.queryItems = [URLQueryItem(name: "pin", value: pin)]
+        guard let url = comps?.url else {
             completion(.failure(LicenseError.network)); return
         }
-        session.dataTask(with: u) { data, _, err in
+        session.dataTask(with: url) { data, _, err in
             guard let data = data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 completion(.failure(err ?? LicenseError.network)); return
             }
             var st = LicenseState.empty(pin: pin)
             st.code = code
-            st.authorized = (obj["authorized"] as? Bool) ?? false
-            st.lastCheck = Date()
-            if let exp = self.num(obj["expire_at"]), exp > 0 {
-                st.expireAt = Date(timeIntervalSince1970: exp)
-            } else if let insec = self.num(obj["expires_in"]), insec > 0 {
-                st.expireAt = Date().addingTimeInterval(insec)
-            }
-            if let note = obj["note"] as? String { st.note = note }
-            self.applyEnvelope(obj, into: &st)
+            self.apply(obj, into: &st)
             completion(.success(st))
         }.resume()
     }
 
-    /// 心跳（保活 + 拉最新配置）
-    func beat(pin: String, code: String,
-              completion: @escaping (Result<LicenseState, Error>) -> Void) {
-        post(path: "/pin/beat", body: ["pin": pin, "code": code]) { result in
-            switch result {
-            case .failure(let e): completion(.failure(e))
-            case .success(let obj):
-                var st = LicenseState.empty(pin: pin)
-                st.code = code
-                st.authorized = (obj["authorized"] as? Bool) ?? false
-                st.lastCheck = Date()
-                if let exp = obj["expire_at"] as? Double {
-                    st.expireAt = Date(timeIntervalSince1970: exp)
-                } else if let insec = obj["expires_in"] as? Double, insec > 0 {
-                    st.expireAt = Date().addingTimeInterval(insec)
-                }
-                self.applyEnvelope(obj, into: &st)
-                completion(.success(st))
-            }
+    // MARK: - 解析
+
+    /// 统一解析：窗口（expires_in / authorized_until）与卡密到期（card_seconds_left）分开落
+    private func apply(_ obj: [String: Any], into st: inout LicenseState) {
+        let now = Date()
+        st.lastCheck = now
+        st.authorized = (obj["authorized"] as? Bool) ?? ((obj["ok"] as? Bool) ?? true)
+
+        if let left = num(obj["expires_in"]) {
+            st.sessionUntil = now.addingTimeInterval(max(0, left))
+        } else if let until = num(obj["authorized_until"]), until > 0 {
+            st.sessionUntil = Date(timeIntervalSince1970: until)
+        } else if let exp = num(obj["expire_at"]), exp > 0 {
+            st.sessionUntil = Date(timeIntervalSince1970: exp)
         }
-    }
 
-    // MARK: - 云端配置包
-
-    /// 若响应里带 cfg（加密信封），立刻解密并落地
-    private func applyEnvelope(_ obj: [String: Any], into st: inout LicenseState) {
-        guard let cfg = obj["cfg"],
-              let data = try? JSONSerialization.data(withJSONObject: cfg),
-              let env = try? decoder.decode(RemoteConfigEnvelope.self, from: data) else { return }
-        guard let plain = try? CryptoBox.open(envelope: env, pin: st.pin, code: st.code),
-              let payload = try? CryptoBox.decodePayload(plain) else { return }
-        st.configKid = env.kid
-        st.configExpire = Date(timeIntervalSince1970: TimeInterval(env.exp))
-        ConfigStore.shared.saveRemotePayload(payload)
+        if let cardLeft = num(obj["card_seconds_left"]) {
+            st.expireAt = now.addingTimeInterval(max(0, cardLeft))
+        } else if let ce = num(obj["card_expire_at"]), ce > 0 {
+            st.expireAt = Date(timeIntervalSince1970: ce)
+        }
     }
 
     private func mapError(_ raw: String) -> LicenseError {
@@ -149,8 +140,9 @@ final class LicenseClient {
         case "card_format":      return .badResponse("卡密格式不对，请检查有没有输错")
         case "card_not_found":   return .badResponse("卡密不存在")
         case "card_revoked":     return .badResponse("卡密已被作废")
-        case "card_used":        return .badResponse("这张卡密已经被用过了")
-        case "card_bound":       return .badResponse("卡密已绑定其他设备")
+        case "card_expired":     return .expired
+        case "card_bound":       return .badResponse("这张卡已绑定其他设备，请联系管理员解绑")
+        case "card_used":        return .badResponse("这张卡密刚被别的设备抢用了")
         case "rate_limited":     return .badResponse("请求太频繁，稍后再试")
         case "bad_pin":          return .badPin
         default: break
@@ -173,7 +165,7 @@ final class LicenseClient {
         return nil
     }
 
-    // MARK: - 基础 POST
+    // MARK: - 基础请求
 
     private func post(path: String, body: [String: Any],
                       completion: @escaping (Result<[String: Any], Error>) -> Void) {
@@ -185,7 +177,7 @@ final class LicenseClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         session.dataTask(with: req) { data, resp, err in
-            if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 400 {
+            if let code = (resp as? HTTPURLResponse)?.statusCode, code >= 500 {
                 completion(.failure(LicenseError.badResponse("服务端错误 \(code)"))); return
             }
             guard let data = data,

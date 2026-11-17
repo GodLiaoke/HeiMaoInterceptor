@@ -1,17 +1,18 @@
 import Foundation
 
 /// 本地状态中心：授权、规则、隧道参数
+///
+/// 注意：规则不再写本地。`RuleService` 只把明文放在内存里，
+/// 这里只负责把它交给界面和隧道配置。
 final class ConfigStore {
 
     static let shared = ConfigStore()
 
     private let defaults = UserDefaults.standard
     private let licenseKey = "hm.license.v1"
-    private let payloadKey = "hm.remotePayload.v1"
     private let statsKey   = "hm.stats.v1"
 
     private(set) var license: LicenseState
-    private var remotePayload: RemoteConfigPayload?
 
     private init() {
         if let data = defaults.data(forKey: licenseKey),
@@ -20,9 +21,8 @@ final class ConfigStore {
         } else {
             license = .empty(pin: ConfigStore.makePin())
         }
-        if let data = defaults.data(forKey: payloadKey) {
-            remotePayload = try? JSONDecoder().decode(RemoteConfigPayload.self, from: data)
-        }
+        /* 旧版本可能把规则明文存在这里，升级后清掉 */
+        defaults.removeObject(forKey: "hm.remotePayload.v1")
     }
 
     // MARK: - 设备码
@@ -59,40 +59,26 @@ final class ConfigStore {
         var st = LicenseState.empty(pin: ConfigStore.makePin())
         st.lastCheck = .distantPast
         save(license: st)
+        RuleService.shared.clear()
     }
 
     var isAuthorized: Bool { license.isUsable() }
 
-    // MARK: - 云端配置包
-
-    func saveRemotePayload(_ p: RemoteConfigPayload) {
-        remotePayload = p
-        if let data = try? JSONEncoder().encode(p) {
-            defaults.set(data, forKey: payloadKey)
+    /// 卡密与在线窗口的一次刷新（兑换 / 续期 / 查询共用）
+    func applySession(_ st: LicenseState, pin: String, code: String) {
+        var merged = st
+        merged.pin = pin
+        merged.code = code.isEmpty ? license.code : code
+        if merged.expireAt == nil && merged.code == license.code {
+            merged.expireAt = license.expireAt
         }
+        save(license: merged)
     }
 
-    func invalidateRemotePayload() {
-        remotePayload = nil
-        defaults.removeObject(forKey: payloadKey)
-    }
+    // MARK: - 规则装配（仅内存）
 
-    // MARK: - 规则装配
-
-    /// 优先级：云端下发的加密包 > 安装包内置规则
     func currentRulesText() -> String {
-        if let p = remotePayload, p.version >= 1, !p.rules.isEmpty {
-            return p.rules
-        }
-        if let url = Bundle.main.url(forResource: "rules", withExtension: "txt"),
-           let text = try? String(contentsOf: url, encoding: .utf8) {
-            return text
-        }
-        if let url = Bundle.main.url(forResource: "rules", withExtension: "txt", subdirectory: "Rules"),
-           let text = try? String(contentsOf: url, encoding: .utf8) {
-            return text
-        }
-        return ""
+        RuleService.shared.text ?? ""
     }
 
     func currentRuleSet() -> RuleSet {
@@ -100,17 +86,13 @@ final class ConfigStore {
     }
 
     var rulesSourceLabel: String {
-        if let p = remotePayload, !p.rules.isEmpty {
-            return "云端下发 · \(p.version)"
-        }
-        return "内置规则库"
+        let v = RuleService.shared.version
+        return v.isEmpty ? "未加载" : "云端下发 · v\(v)"
     }
 
-    /// 云端公告优先，其次服务端 announcement
-    var cloudNotice: String? {
-        guard let n = remotePayload?.notice, !n.isEmpty else { return nil }
-        return n
-    }
+    var rulesVersion: String { RuleService.shared.version }
+
+    var cloudNotice: String? { nil }
 
     // MARK: - 隧道参数
 
@@ -124,7 +106,7 @@ final class ConfigStore {
             "pin": pin,
             "code": license.code,
             "expireAt": license.expireAt?.timeIntervalSince1970 ?? 0,
-            "configExpire": license.configExpire?.timeIntervalSince1970 ?? 0,
+            "rulesVersion": RuleService.shared.version,
             "rulesText": currentRulesText(),
             "routes": routes,
             "dnsIP": AppConfig.dnsProxyIP,

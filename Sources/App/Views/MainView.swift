@@ -41,6 +41,10 @@ struct MainView: View {
                 .padding(.bottom, 48)
             }
 
+            if model.forceUpdate, let info = model.updateInfo {
+                ForceUpdateView(info: info)
+            }
+
             // Toast
             if let toast = model.toast {
                 VStack {
@@ -58,6 +62,20 @@ struct MainView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model)
+        }
+        .alert("发现新版本", isPresented: $model.showUpdate) {
+            Button("稍后", role: .cancel) { }
+            Button("立即更新") {
+                if let info = model.updateInfo, let url = URL(string: info.url) {
+                    UIApplication.shared.open(url)
+                }
+            }
+        } message: {
+            if let info = model.updateInfo {
+                Text("v\(info.version)\n\(info.notes.isEmpty ? "建议更新到最新版本" : info.notes)")
+            } else {
+                Text("建议更新到最新版本")
+            }
         }
         .onAppear {
             withAnimation(.easeOut(duration: 0.7)) { appear = true }
@@ -138,19 +156,21 @@ struct MainView: View {
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundColor(HK.text)
                     Spacer()
-                    GlassPill(text: model.authorized ? "已授权" : "未授权",
+                    GlassPill(text: model.license.statusText(),
                               icon: model.authorized ? "checkmark.seal.fill" : "lock.fill",
                               tint: model.authorized ? HK.mint : HK.amber)
                 }
                 DividerLine()
                 InfoRow(title: "到期时间",
-                        value: model.license.authorized ? model.license.expireText : "未激活卡密",
+                        value: model.license.code.isEmpty ? "未激活卡密" : model.license.expireText,
                         valueColor: model.authorized ? HK.text : HK.amber)
+                InfoRow(title: "剩余时间", value: model.license.remainText)
                 InfoRow(title: "规则库来源",
                         value: model.ruleSource,
                         valueColor: HK.text)
                 InfoRow(title: "规则规模",
                         value: "\(model.ruleCounts.ips) IP · \(model.ruleCounts.domains) 域名")
+                InfoRow(title: "规则版本", value: model.ruleSource)
                 if !model.authorized {
                     Button {
                         showSettings = true
@@ -264,7 +284,7 @@ struct MainView: View {
             Text("黑猫公益 · 永久免费 · 不采集任何流量内容")
                 .font(.system(size: 10.5, weight: .regular, design: .rounded))
                 .foregroundColor(HK.textFaint)
-            Text("v1.0.0 · build 100")
+            Text("v\(AppConfig.appVersion) · build \(AppConfig.buildNumber)")
                 .font(.system(size: 9.5, weight: .regular, design: .monospaced))
                 .foregroundColor(HK.textFaint.opacity(0.7))
         }
@@ -288,5 +308,61 @@ struct ToastBubble: View {
             )
             .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
             .padding(.horizontal, 24)
+    }
+}
+
+
+/// 强制更新：盖住主界面，只能去下载
+struct ForceUpdateView: View {
+    let info: AppUpdateInfo
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.78).ignoresSafeArea()
+            VStack(spacing: 14) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.system(size: 42))
+                    .foregroundColor(HK.cyan)
+                Text("需要更新后才能继续使用")
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundColor(HK.text)
+                Text("当前 v\(AppConfig.appVersion) · 最新 v\(info.version)")
+                    .font(.system(size: 12, weight: .regular, design: .rounded))
+                    .foregroundColor(HK.textDim)
+                if !info.notes.isEmpty {
+                    Text(info.notes)
+                        .font(.system(size: 12, weight: .regular, design: .rounded))
+                        .foregroundColor(HK.textDim)
+                        .multilineTextAlignment(.center)
+                        .lineSpacing(3)
+                }
+                Button {
+                    if let url = URL(string: info.url) {
+                        UIApplication.shared.open(url)
+                    }
+                } label: {
+                    Text(info.url.isEmpty ? "下载地址未配置" : "前往下载")
+                        .font(.system(size: 13.5, weight: .semibold, design: .rounded))
+                        .foregroundColor(HK.bg)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                .fill(LinearGradient(colors: [HK.cyan, HK.blue],
+                                                     startPoint: .leading, endPoint: .trailing))
+                        )
+                }
+                .disabled(info.url.isEmpty)
+            }
+            .padding(22)
+            .frame(maxWidth: 320)
+            .background(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.white.opacity(0.2), lineWidth: 0.8))
+            )
+            .padding(.horizontal, 28)
+        }
     }
 }

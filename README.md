@@ -30,3 +30,14 @@ xcodebuild archive -project HeiMaoInterceptor.xcodeproj \
 - 设备码由安装实例生成，卡密在 `https://ios.ouovo.cc` 兑换
 - 云端配置包使用 AES-256-GCM，密钥由 `卡密 + 设备码` 派生，客户端不保存明文密钥
 - 配置包带过期时间，过期后隧道拒绝启动
+
+
+---
+
+## v1.0 更新（2026-11-17）
+
+- **规则上云**：安装包不再带规则；`/api/rules/manifest` + `/api/rules/download` 凭卡密下载，
+  AES-256-GCM 加密、密钥按天轮换，明文只进内存
+- **版本管理**：后台可发布版本、设强制更新、填 IPA 下载地址；客户端启动检测
+- **授权修复**：卡密到期与在线校验窗口分开；所有页面统一 `LicenseState.isUsable()`，
+  不再出现「设置已授权 / 主页未授权」；换设备复用卡密返回 `card_bound`

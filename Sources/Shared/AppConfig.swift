@@ -4,6 +4,8 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫公益拦截"
+    static let appVersion     = "1.0"
+    static let buildNumber    = 100
     static let apiBase        = "https://ios.ouovo.cc/api"
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
@@ -26,12 +28,13 @@ enum AppConfig {
     /// 云端配置包解密盐（参与密钥派生，改动会导致旧配置包失效）
     static let configSalt     = "HeiMao-Club-2026::cfg::v1"
 
-    /// 授权宽限期：离线时本地授权最多再撑 6 小时
-    static let offlineGrace: TimeInterval = 6 * 3600
+    /// 授权宽限期：在线校验窗口过期后，本地再容忍这么久（断网/抖动不误判）
+    static let offlineGrace: TimeInterval = 10 * 60
 
-    /// 心跳间隔
-    static let heartbeatInterval: TimeInterval = 300
+    /// 心跳间隔：每 60 秒推一次在线校验窗口（服务端窗口 600 秒）
+    static let heartbeatInterval: TimeInterval = 60
 
-    /// 规则热更新地址（可选，失败不影响使用）
-    static let remoteRulesURL = "https://raw.githubusercontent.com/GodLiaoke/HeiMaoInterceptor/main/Resources/Rules/rules.txt"
+    /// 云端规则包密钥派生参数（必须与服务端 RulesService 一致）
+    static let rulesSalt = "heimao-salt-v1"
+    static let rulesInfo = "heimao-rules-v1"
 }

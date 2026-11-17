@@ -58,6 +58,10 @@ final class TunnelController: ObservableObject {
     // MARK: - 启动
 
     func start(completion: @escaping (Result<Void, Error>) -> Void) {
+        guard RuleService.shared.isLoaded else {
+            completion(.failure(LicenseError.badResponse("云端规则还没加载好，稍后再试")))
+            return
+        }
         let conf = ConfigStore.shared.tunnelConfiguration()
 
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, error in

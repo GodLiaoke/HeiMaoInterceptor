@@ -122,13 +122,13 @@ struct SettingsView: View {
                     DividerLine()
 
                     InfoRow(title: "当前状态",
-                            value: model.license.authorized ? "已授权" : "未授权",
-                            valueColor: model.license.authorized ? HK.mint : HK.amber)
-                    InfoRow(title: "到期时间",
-                            value: model.license.authorized ? model.license.expireText : "—")
-                    if let kid = model.license.configKid {
-                        InfoRow(title: "配置版本", value: kid, mono: true)
-                    }
+                            value: model.license.statusText(),
+                            valueColor: model.authorized ? HK.mint : HK.amber)
+                    InfoRow(title: "卡密到期",
+                            value: model.license.code.isEmpty ? "—" : model.license.expireText)
+                    InfoRow(title: "剩余时间", value: model.license.remainText)
+                    InfoRow(title: "本次校验", value: model.license.sessionText)
+                    InfoRow(title: "规则版本", value: model.ruleSource)
                 }
             }
         }
@@ -180,9 +180,8 @@ struct SettingsView: View {
                     DividerLine()
                     HStack(spacing: 10) {
                         Button {
-                            model.refreshLicense()
-                            model.refreshRules()
-                            model.toast = "规则已同步"
+                            model.refreshLicense(silent: true)
+                            model.loadRules(force: true)
                         } label: {
                             Text("同步云端规则")
                                 .font(.system(size: 12.5, weight: .semibold, design: .rounded))
@@ -217,7 +216,7 @@ struct SettingsView: View {
             SectionHeader(title: "关于", subtitle: "ABOUT")
             GlassCard {
                 VStack(spacing: 12) {
-                    InfoRow(title: "应用", value: "\(AppConfig.appName) v1.0.0")
+                    InfoRow(title: "应用", value: "\(AppConfig.appName) v\(AppConfig.appVersion)")
                     InfoRow(title: "兼容", value: "iOS 15.0 – iOS 27")
                     InfoRow(title: "内核", value: "Packet Tunnel · 用户态协议栈")
                     DividerLine()
