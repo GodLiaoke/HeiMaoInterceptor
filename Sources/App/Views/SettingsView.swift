@@ -299,7 +299,7 @@ struct SettingsView: View {
                 VStack(spacing: 12) {
                     InfoRow(title: "应用", value: "\(AppConfig.appName) v\(AppConfig.appVersion)")
                     InfoRow(title: "版本", value: "v\(AppConfig.appVersion) · build \(AppConfig.buildNumber)")
-                    InfoRow(title: "兼容", value: "iOS 15.0 – iOS 27")
+                    InfoRow(title: "兼容", value: "iOS 15.0 – iOS 27（含 26 / 27）")
                     InfoRow(title: "内核", value: "Packet Tunnel · 用户态协议栈")
                     DividerLine()
                     if let url = URL(string: AppConfig.channelURL) {
