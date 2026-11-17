@@ -2,9 +2,53 @@
 
 ## 当前版本
 
-**v1.0.3 build 105**（2026-11-17 · 多套规则集名称下发 / 规则详情页 / 服务端规则集补全）
+**v1.0.4 build 107**（2026-11-17 · 巨魔签名兼容 / 拦截内核升级）
 
 正式名称：**黑猫拦截 Pro**（显示名、包内标题、设置页统一）
+
+---
+
+## 1.0.4 改了什么
+
+### 1. 巨魔（TrollStore）启动失败 permission denied —— 根因是包没签名
+
+事实：1.0.3 及以前的 ipa 里，主程序和扩展二进制**完全没有代码签名**
+（Mach-O 里连 `LC_CODE_SIGNATURE` 段都没有）。iOS 15+ 对 App 内嵌扩展
+的签名校验是强制的：主程序签了、`PlugIns/HeiMaoTunnel.appex` 没签，
+系统会直接拒绝整个 App，表现就是「启动失败: permission denied」。
+
+修复（构建流水线内完成）：
+
+- 发布前用 `ldid` 对**扩展**和**主程序**都做 ad-hoc 签名，从内到外按顺序签
+- 签名时写入 `Resources/TrollStore-App.entitlements` /
+  `Resources/TrollStore-Tunnel.entitlements`：
+  `platform-application`、`get-task-allow`、`com.apple.developer.networking.networkextension`
+- TrollStore 安装时会读取二进制里已有的 entitlements 并沿用，
+  所以 VPN 权限也跟着进去（之前没签 → 只能创建配置、开不起来）
+- 产物两套：
+  - `HeiMao_Pro_v1.0.4_build107_trollstore.ipa`（已签名，巨魔直装）
+  - `HeiMao_Pro_v1.0.4_build107.ipa`（未签名，ESign / 爱思自签用）
+- 打包前后都强制 `chmod 755` 主程序与扩展，防止执行位在压缩环节丢失
+
+### 2. 拦截内核升级
+
+| 项目 | 1.0.3 | 1.0.4 |
+|---|---|---|
+| AAAA 查询 | 返回空答案 | 保持（确认无 IPv6 绕过） |
+| HTTPS/SVCB(64/65) 查询 | **照常转发真实记录** | 拦截域名一律空答案，堵住 ipv4hint/ipv6hint 绕过 |
+| DNS 解析 | 每个查询都打上游 | 本地缓存（拦截 30s / 放行 90s，1024 条上限，LRU 淘汰） |
+| 缓存一致性 | — | 规则热更新时整体清空，避免「已改拦截但缓存还在放行」 |
+| 上游 DNS | 串行回退，超时 2.5s×3 | `connect()` 绑定上游 + 校验事务 ID + 900ms 超时 |
+| DNS 并发 | 无上限（可能爆线程） | 信号量限 8 路 |
+| TCP RST（已建立连接） | seq=0，被内核当窗口外丢弃 → 等超时 | seq=对端 ACK、ack=0、仅 RST 位，立即失败 |
+| TCP RST（重复包） | 每包都回 | 同一五元组 2 秒内只回一次，防 RST 风暴 |
+| 规则读取 | 每包一次 `DispatchQueue.sync` | 换成 `NSLock` 保护快照，单包开销降一个数量级 |
+| 统计 | 每包 +1 连接数 | 连接数只在真正回 RST 时 +1 |
+
+### 3. 隧道权限错误提示
+
+`TunnelController.explain()` 把系统的 `permission denied` / NEVPNError
+翻成能照着做的中文提示（签名不完整 / 配置被停用 / 隧道启动失败）。
 
 ---
 
