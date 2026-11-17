@@ -119,7 +119,10 @@ final class StatsServer {
 
         /* 请求内容不影响结果，只要连上来就是要统计；读一下把请求行吃掉 */
         var req = [UInt8](repeating: 0, count: 64)
-        _ = req.withUnsafeMutableBytes { recv(fd, $0.baseAddress, $0.count, 0) }
+        _ = req.withUnsafeMutableBufferPointer { buf -> Int in
+            guard let base = buf.baseAddress else { return 0 }
+            return recv(fd, UnsafeMutableRawPointer(base), buf.count, 0)
+        }
 
         var payload = snapshot()
         if payload.isEmpty { return }

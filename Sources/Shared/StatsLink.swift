@@ -69,12 +69,18 @@ enum StatsLink {
         setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         let req = Array(requestLine.utf8)
-        _ = req.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+        _ = req.withUnsafeBufferPointer { buf -> Int in
+            guard let base = buf.baseAddress else { return 0 }
+            return send(fd, UnsafeRawPointer(base), buf.count, 0)
+        }
 
         var out = Data()
         var chunk = [UInt8](repeating: 0, count: 16384)
         while out.count < 256 * 1024 {
-            let got = chunk.withUnsafeMutableBytes { recv(fd, $0.baseAddress, $0.count, 0) }
+            let got = chunk.withUnsafeMutableBufferPointer { buf -> Int in
+                guard let base = buf.baseAddress else { return 0 }
+                return recv(fd, UnsafeMutableRawPointer(base), buf.count, 0)
+            }
             if got <= 0 { break }
             out.append(contentsOf: chunk[0..<got])
         }
