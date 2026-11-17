@@ -88,12 +88,28 @@ enum PacketCodec {
     // MARK: - 构造
 
     /// 伪造 TCP RST：让本机连接立即失败（不发也不收任何真实流量）
+    ///
+    /// 序列号按 RFC 793 3.4 分两种情况，之前一律用 seq=0 是错的：
+    ///   - 握手包（SYN，不带 ACK）：RST 的 SEQ=0，ACK = 对端 SEQ + 1，置 ACK 位
+    ///   - 已建立的连接（带 ACK）：RST 的 SEQ 必须取对端的 ACK（它期待的下一个序号），
+    ///     ACK 字段清零，不置 ACK 位 —— 否则本机 TCP 栈会认为这是窗口外的乱包直接丢掉，
+    ///     用户体感就变成「卡住等超时」而不是「秒失败」
     static func buildRST(for p: Parsed) -> Data? {
         guard let tcp = p.tcp else { return nil }
 
-        var ackNum = tcp.seq + UInt32(tcp.payloadLength)
-        if tcp.isSYN { ackNum += 1 }
-        if tcp.isFIN { ackNum += 1 }
+        var seqNum: UInt32 = 0
+        var ackNum: UInt32 = 0
+        var flags: UInt8 = 0x04                            // RST
+
+        if tcp.flags & 0x10 != 0 {                         // 已建立连接
+            seqNum = tcp.ack
+        } else {
+            var ack = tcp.seq + UInt32(tcp.payloadLength)
+            if tcp.isSYN { ack &+= 1 }
+            if tcp.isFIN { ack &+= 1 }
+            ackNum = ack
+            flags = 0x14                                   // RST | ACK
+        }
 
         var out = Data()
         out.append(contentsOf: buildIPHeader(src: p.dstIP, dst: p.srcIP, proto: 6,
@@ -102,9 +118,9 @@ enum PacketCodec {
         var t = Data()
         t.append(be16(tcp.dstPort))                        // 源端口 = 原目的端口
         t.append(be16(tcp.srcPort))                        // 目的端口 = 原源端口
-        t.append(be32bytes(0))                             // seq
-        t.append(be32bytes(ackNum))                        // ack
-        t.append(contentsOf: [0x50, 0x14])                 // dataOffset 5, RST|ACK
+        t.append(be32bytes(seqNum))
+        t.append(be32bytes(ackNum))
+        t.append(contentsOf: [0x50, flags])                // dataOffset 5
         t.append(be16(0))                                  // window
         t.append(be16(0))                                  // checksum 占位
         t.append(be16(0))                                  // urgent
@@ -112,6 +128,13 @@ enum PacketCodec {
         t.replaceSubrange(16..<18, with: be16(csum))
         out.append(t)
         return out
+    }
+
+    /// 连接标识：同一个五元组只回一次 RST
+    static func flowKey(_ p: Parsed) -> UInt64 {
+        let sp = UInt64(p.tcp?.srcPort ?? p.udp?.srcPort ?? 0)
+        let dp = UInt64(p.tcp?.dstPort ?? p.udp?.dstPort ?? 0)
+        return (UInt64(p.srcIP) << 32) ^ (UInt64(p.dstIP) << 16) ^ (sp << 8) ^ dp
     }
 
     static func buildIPHeader(src: UInt32, dst: UInt32, proto: UInt8,

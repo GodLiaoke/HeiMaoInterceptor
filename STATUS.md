@@ -74,6 +74,20 @@
 
 ---
 
+## 1.0.3 build 106 上线记录（2026-11-17 19:20）
+
+- 包已上传服务器：`https://ios.ouovo.cc/dl/HeiMao_Pro_v1.0.3_build106.ipa`（1,150,614 B，sha256 `97abeec6…7800`）
+- 后台 `app_versions` 记录更新为 1.0.3 / 106，`force_update = 0`，`min_version = 1.0.0`
+- 线上实测（真实卡密 11223344）：
+  - `rules/manifest` 返回 `set_count = 1`、`sets = ["公益规则"]`、`sets_detail` 含名称/版本/条数
+  - `rules/download` 按客户端算法（HKDF + AES-256-GCM，HMR1 头）解密成功，sha256 与 manifest 一致
+  - `app/version`：1.0.3 不提示更新；1.0.2 / 1.0 提示但不强制
+- 服务端多套合并实测（临时建两套 → 删掉）：
+  - 三套合并后 manifest `set_count = 3`，合并内容含两套的 IP/域名/端口段
+  - `admin/rulesets/sort` 上移生效，合并顺序跟着变
+  - 删除两套后重新下发，`sha256` 与测试前完全一致 —— 合并无损
+- 已知内容问题：当前「公益规则」里没有 `#PORT` 段（端口 0 条），端口拦截处于关闭状态
+
 ## 构建
 
 - 仓库：`GodLiaoke/HeiMaoInterceptor`，分支 `main`

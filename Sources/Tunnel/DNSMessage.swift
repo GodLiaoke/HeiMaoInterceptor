@@ -53,17 +53,25 @@ enum DNSMessage {
     ///   1. 连接会真的进隧道，被我们当场断掉，用户立刻看到失败，不用等系统超时
     ///   2. 断掉的动作能被统计到，界面上的「HTTPS 拦断」才是真实数字
     static func buildSinkhole(for q: Query, ip: UInt32) -> Data {
+        /* 只有 A 查询才回一条黑洞 A 记录。
+           AAAA / HTTPS(SVCB) 一律回空答案：
+             - AAAA 回真实记录，客户端会直接走 IPv6 连过去，整条拦截就绕过了
+             - HTTPS(65) / SVCB(64) 记录里带 ipv4hint / ipv6hint，
+               Safari、Chrome 会拿 hint 直接连，同样绕过 DNS 层
+           回「NOERROR + 0 条记录」既不报错、也不给任何可连的地址，
+           客户端只能回退到 A 记录，也就是我们给的黑洞地址。 */
+        let wantsA = (q.qtype == 1 || q.qtype == 255)
         var out = Data()
         var flags: UInt16 = 0x8000            // QR = 1
         flags |= (q.flags & 0x0100)           // 复制 RD
         flags |= 0x0400                       // AA
         flags |= 0x0080                       // RA
-        // RCODE = 0（NOERROR），返回一个 0.0.0.0 的 A 记录让客户端立刻失败
+        // RCODE = 0（NOERROR）
 
         out.append(be16(q.id))
         out.append(be16(flags))
         out.append(be16(1))                   // QDCOUNT
-        out.append(be16(isIPv6(q.qtype) ? 0 : 1))  // ANCOUNT
+        out.append(be16(wantsA ? 1 : 0))       // ANCOUNT
         out.append(be16(0))                   // NSCOUNT
         out.append(be16(0))                   // ARCOUNT
 
@@ -72,19 +80,17 @@ enum DNSMessage {
             out.append(q.raw.subdata(in: 12..<q.questionEnd))
         }
 
-        if !isIPv6(q.qtype) {
+        if wantsA {
             out.append(contentsOf: [0xC0, 0x0C])       // 指向 question 的 NAME
             out.append(be16(1))                        // TYPE A
             out.append(be16(1))                        // CLASS IN
-            out.append(be32bytes(60))                  // TTL
+            out.append(be32bytes(30))                  // TTL 30s：后台改规则能较快生效
             out.append(be16(4))                        // RDLENGTH
             out.append(be32bytes(ip))                  // 黑洞地址
         }
         return out
     }
 
-    /// AAAA 查询返回空答案（NOERROR + 0 记录），避免客户端回退到真实 IPv6
-    static func isIPv6(_ qtype: UInt16) -> Bool { qtype == 28 }
 
     static func be16(_ v: UInt16) -> Data { Data([UInt8(v >> 8), UInt8(v & 0xFF)]) }
 

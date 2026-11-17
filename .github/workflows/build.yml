@@ -67,7 +67,13 @@ jobs:
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -R "$APP" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
-          zip -qry HeiMaoInterceptor.ipa Payload
+
+          # 可执行权限兜底：巨魔 / 第三方签名器最怕这个位丢了
+          find Payload -type f -perm -u+x -exec chmod 755 {} \;
+          chmod 755 Payload/HeiMaoInterceptor.app/HeiMaoInterceptor
+          chmod 755 Payload/HeiMaoInterceptor.app/PlugIns/HeiMaoTunnel.appex/HeiMaoTunnel
+
+          zip -qryX HeiMaoInterceptor.ipa Payload
           ls -lh HeiMaoInterceptor.ipa
           unzip -l HeiMaoInterceptor.ipa | head -30
           echo "--- bundle check ---"
@@ -91,10 +97,68 @@ jobs:
 
           echo "IPA_SIZE=$(stat -f%z HeiMaoInterceptor.ipa)" >> "$GITHUB_ENV"
 
+      # ---------------------------------------------------------------
+      # 预签名：巨魔 / 第三方签名器只签主二进制、漏掉 appex 时，
+      # iOS 15+ 会直接拒绝整个 App（表现为“启动失败: permission denied”）。
+      # 这里把 appex 与主二进制都签上，并带上 platform-application 与
+      # NetworkExtension 权限，TrollStore 安装时会沿用这份 entitlements。
+      # ---------------------------------------------------------------
+      - name: Pre-sign for TrollStore
+        run: |
+          set -e
+          APP="$RUNNER_TEMP/Payload/HeiMaoInterceptor.app"
+          APPEX="$APP/PlugIns/HeiMaoTunnel.appex"
+
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid || true
+          fi
+          if ! command -v ldid >/dev/null 2>&1; then
+            ARCH=$(uname -m)
+            if [ "$ARCH" = "arm64" ]; then A=arm64; else A=x86_64; fi
+            curl -fL -o /tmp/ldid "https://github.com/ProcursusTeam/ldid/releases/latest/download/ldid_macosx_${A}" || true
+            if [ -s /tmp/ldid ]; then
+              chmod +x /tmp/ldid
+              sudo mv /tmp/ldid /usr/local/bin/ldid
+            fi
+          fi
+          echo "ldid: $(command -v ldid || echo none)"
+          ldid -h >/dev/null 2>&1 || true
+
+          SIGN_LOG="$RUNNER_TEMP/sign.log"
+          : > "$SIGN_LOG"
+
+          if command -v ldid >/dev/null 2>&1; then
+            # 从内到外签：先扩展，再主程序
+            ldid -SResources/TrollStore-Tunnel.entitlements "$APPEX/HeiMaoTunnel" 2>&1 | tee -a "$SIGN_LOG"
+            ldid -SResources/TrollStore-App.entitlements "$APP/HeiMaoInterceptor" 2>&1 | tee -a "$SIGN_LOG"
+            echo "--- appex entitlements ---"
+            ldid -e "$APPEX/HeiMaoTunnel" | tee -a "$SIGN_LOG"
+            echo "--- app entitlements ---"
+            ldid -e "$APP/HeiMaoInterceptor" | tee -a "$SIGN_LOG"
+          else
+            echo "ldid unavailable, falling back to ad-hoc codesign (结构签名, 不含受限权限)"
+            codesign -f -s - --timestamp=none "$APPEX/HeiMaoTunnel"
+            codesign -f -s - --timestamp=none "$APP/HeiMaoInterceptor"
+            codesign -dv "$APP/HeiMaoInterceptor" 2>&1 | tee -a "$SIGN_LOG" || true
+          fi
+
+          # 重新打包（已签名版）
+          cd "$RUNNER_TEMP"
+          rm -f HeiMaoInterceptor-TrollStore.ipa
+          zip -qryX HeiMaoInterceptor-TrollStore.ipa Payload
+          ls -lh HeiMaoInterceptor-TrollStore.ipa
+
+          # 签名前后都要保住执行位
+          unzip -Z HeiMaoInterceptor-TrollStore.ipa | grep -E "HeiMaoInterceptor$|HeiMaoTunnel$"
+          echo "SIGN_PHASE_OK"
+
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: HeiMaoInterceptor-ipa-${{ matrix.runner }}
-          path: ${{ runner.temp }}/HeiMaoInterceptor.ipa
+          path: |
+            ${{ runner.temp }}/HeiMaoInterceptor.ipa
+            ${{ runner.temp }}/HeiMaoInterceptor-TrollStore.ipa
+            ${{ runner.temp }}/sign.log
           if-no-files-found: error
           retention-days: 30
