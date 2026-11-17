@@ -145,9 +145,9 @@ final class CardService
             AuthGate::sealByCard((int) $id);
         } elseif ($status === 1) {
             /* 解封：授权窗口同样只给 window 秒，不再整段下发到卡密到期 */
+            /* 解封：按 pins.card_id 直接恢复，比走 card_uses 子查询更可靠 */
             $grant = min((int) $card['expire_at'], time() + self::authWindow());
-            $pdo->prepare('UPDATE pins SET authorized_until = ?
-                           WHERE pin IN (SELECT pin FROM card_uses WHERE card_id = ?)')
+            $pdo->prepare('UPDATE pins SET authorized_until = ? WHERE card_id = ?')
                 ->execute([$grant, $id]);
         }
         return true;
@@ -173,8 +173,7 @@ final class CardService
                 $pdo->prepare('UPDATE cards SET expire_at = ?, duration_sec = ? WHERE id = ?')
                     ->execute([$newExpire, max(60, $newExpire - time()), $id]);
                 $grant = min($newExpire, time() + self::authWindow());
-                $pdo->prepare('UPDATE pins SET authorized_until = ?
-                               WHERE pin IN (SELECT pin FROM card_uses WHERE card_id = ?)')
+                $pdo->prepare('UPDATE pins SET authorized_until = ? WHERE card_id = ?')
                     ->execute([$grant, $id]);
             }
             $pdo->prepare('INSERT INTO audit(ts, admin, action, target, ip, detail) VALUES(?,?,?,?,?,?)')
