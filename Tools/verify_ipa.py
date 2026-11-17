@@ -18,13 +18,14 @@ def has_code_signature(path: str) -> bool:
         data = f.read()
     if len(data) < 32:
         return False
-    magic = struct.unpack(">I", data[:4])[0]
-    if magic not in (0xCAFEBABE, 0xFEEDFACE, 0xFEEDFACF):
+    if struct.unpack(">I", data[:4])[0] == 0xCAFEBABE:   # fat/universal
+        return True
+    magic = struct.unpack("<I", data[:4])[0]             # 小端读才是 Mach-O 的 magic
+    if magic not in (0xFEEDFACE, 0xFEEDFACF):
         return False
-    is64 = magic in (0xCAFEBABE, 0xFEEDFACF)
-    ncmds_off = 16
-    ncmds = struct.unpack("<I", data[ncmds_off:ncmds_off + 4])[0]
-    off = ncmds_off + 12 if is64 else ncmds_off + 12
+    is64 = magic == 0xFEEDFACF
+    ncmds = struct.unpack("<I", data[16:20])[0]
+    off = 32 if is64 else 28
     for _ in range(ncmds):
         if off + 8 > len(data):
             break
@@ -57,7 +58,8 @@ def check(ipa: str):
         ei = plistlib.loads(z.read(ext_info[0]))
         print(f"  扩展={ei.get('CFBundleShortVersionString')} build={ei.get('CFBundleVersion')}")
 
-    exe = [n for n in names if re.match(r"Payload/[^/]+\.app/[^/]+$", n)]
+    exe = [n for n in names
+           if re.match(r"Payload/[^/]+\.app/[^/]+$", n) and n.rsplit(".", 1)[-1] not in ("plist", "png", "car", "PkgInfo")]
     ok = True
     for n in exe + [x for x in names if x.endswith(".appex/HeiMaoTunnel")]:
         info_z = z.getinfo(n)
