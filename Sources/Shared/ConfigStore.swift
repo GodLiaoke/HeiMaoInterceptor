@@ -77,9 +77,8 @@ final class ConfigStore {
         if merged.expireAt == nil && merged.code == license.code {
             merged.expireAt = license.expireAt
         }
-        /* 服务端明确判死时，本地有效期也一并作废，防止界面残留旧到期时间误导 */
+        /* 服务端明确判死时，本地校验窗口一并作废，防止界面残留旧窗口误导 */
         if merged.verdict.isHardFailure {
-            merged.expireAt = merged.expireAt
             merged.sessionUntil = Date(timeIntervalSince1970: 0)
             merged.authorized = false
         }

@@ -192,38 +192,21 @@ final class SessionService
     /** 只读状态：不改任何计数，供 UI 拉真实状态 */
     public static function state(string $pin): array
     {
-        $now = time();
-        $pdo = Database::pdo();
-        $st = $pdo->prepare(
-            'SELECT p.pin, p.authorized_until, p.card_id, c.code, c.status, c.expire_at
-             FROM pins p LEFT JOIN cards c ON c.id = p.card_id WHERE p.pin = ?'
-        );
-        $st->execute([$pin]);
-        $row = $st->fetch();
-        if (!$row) {
-            return [
-                'ok' => true, 'pin' => $pin, 'authorized' => false,
-                'authorized_until' => 0, 'expires_in' => 0,
-                'card_expire_at' => 0, 'card_seconds_left' => 0, 'card_status' => 0,
-                'window' => self::window(), 'grace' => self::grace(), 'server_time' => $now,
-            ];
-        }
-
-        $until = (int) $row['authorized_until'];
-        $cardExpire = (int) ($row['expire_at'] ?? 0);
+        $g = AuthGate::evaluate($pin);
         return [
             'ok'                 => true,
             'pin'                => $pin,
-            'authorized'         => $until > $now,
-            'authorized_until'   => $until,
-            'expires_in'         => max(0, $until - $now),
-            'card_expire_at'     => $cardExpire,
-            'card_seconds_left'  => max(0, $cardExpire - $now),
-            'card_status'        => (int) ($row['status'] ?? 0),
-            'card'               => $row['code'] ? substr((string) $row['code'], 0, 4) . '****' : null,
+            'authorized'         => $g['authorized'],
+            'reason'             => $g['reason'],
+            'authorized_until'   => $g['authorized_until'],
+            'expires_in'         => $g['expires_in'],
+            'card_expire_at'     => $g['card_expire_at'],
+            'card_seconds_left'  => $g['card_seconds_left'],
+            'card_status'        => $g['card_status'],
+            'card'               => $g['card'],
             'window'             => self::window(),
             'grace'              => self::grace(),
-            'server_time'        => $now,
+            'server_time'        => time(),
         ];
     }
 
@@ -240,6 +223,8 @@ final class SessionService
     {
         return [
             'ok'                   => true,
+            'authorized'           => true,
+            'reason'               => AuthGate::OK,
             'expires_in'           => max(0, $until - $now),
             /* expire_at 保持旧语义（本次窗口结束），老客户端不受影响 */
             'expire_at'            => $until,

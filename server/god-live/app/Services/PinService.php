@@ -32,37 +32,35 @@ final class PinService
         }
     }
 
-    /** @return array{pin:string,authorized:bool,expires_in:int,expire_at:int,card_expire_at:int,card:?string} */
+    /**
+     * 授权状态 —— 唯一判定走 AuthGate
+     * （以前只看窗口 authorized_until，卡密作废后仍然回 authorized=true，
+     *   客户端就继续显示「已授权」，但隧道一联网校验就失败、开不起来。）
+     *
+     * @return array{pin:string,authorized:bool,reason:string,...}
+     */
     public static function status(string $pin): array
     {
-        $pdo = Database::pdo();
-        $st = $pdo->prepare('SELECT p.pin, p.authorized_until, c.code, c.status AS card_status, c.expire_at AS card_expire_at
-                             FROM pins p LEFT JOIN cards c ON c.id = p.card_id
-                             WHERE p.pin = ?');
-        $st->execute([$pin]);
-        $row = $st->fetch();
-        $now = time();
-        if (!$row) {
-            return ['pin' => $pin, 'authorized' => false, 'expires_in' => 0,
-                    'expire_at' => 0, 'authorized_until' => 0,
-                    'card_expire_at' => 0, 'card_seconds_left' => 0, 'card_status' => 0,
-                    'card' => null];
-        }
-        $until = (int) $row['authorized_until'];
-        $left = max(0, $until - $now);
-        $cardExpire = (int) ($row['card_expire_at'] ?? 0);
+        $r = AuthGate::evaluate($pin);
+
         return [
             'pin'                => $pin,
-            'authorized'         => $left > 0,
-            'expires_in'         => $left,
+            'authorized'         => $r['authorized'],
+            'reason'             => $r['reason'],
+            'expires_in'         => $r['expires_in'],
             /* expire_at 保持旧语义：本次窗口结束时间（老客户端兼容） */
-            'expire_at'          => $until,
-            'authorized_until'   => $until,
-            'card_expire_at'     => $cardExpire,
-            'card_seconds_left'  => max(0, $cardExpire - $now),
-            'card_status'        => (int) ($row['card_status'] ?? 0),
-            'expire_text'        => $left > 0 ? date('Y-m-d H:i:s', $until) : '',
-            'card'               => $left > 0 ? substr((string) $row['code'], 0, 4) . '****' : null,
+            'expire_at'          => $r['authorized_until'],
+            'authorized_until'   => $r['authorized_until'],
+            'card_expire_at'     => $r['card_expire_at'],
+            'card_seconds_left'  => $r['card_seconds_left'],
+            'card_status'        => $r['card_status'],
+            'expire_text'        => $r['card_expire_at'] > 0
+                ? date('Y-m-d H:i:s', $r['card_expire_at'])
+                : '',
+            'card'               => $r['card'],
+            'window'             => (int) Config::get('auth_window_sec', 600),
+            'grace'              => (int) Config::get('grace_sec', 300),
+            'server_time'        => time(),
         ];
     }
 

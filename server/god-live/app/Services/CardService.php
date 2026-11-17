@@ -140,9 +140,9 @@ final class CardService
             ->execute([time(), $admin, $status === 2 ? 'card.ban' : 'card.unban', (string) $id, $ip,
                        'status=' . $status]);
         if ($status === 2) {
-            $pdo->prepare('UPDATE pins SET authorized_until = 0
-                           WHERE pin IN (SELECT pin FROM card_uses WHERE card_id = ?)')
-                ->execute([$id]);
+            /* 作废：绑定这个卡密的所有配对码会话立刻封掉，
+               客户端下一次校验就会收到 card_revoked，界面同步变未授权 */
+            AuthGate::sealByCard((int) $id);
         } elseif ($status === 1) {
             /* 解封：授权窗口同样只给 window 秒，不再整段下发到卡密到期 */
             $grant = min((int) $card['expire_at'], time() + self::authWindow());
@@ -222,8 +222,7 @@ final class CardService
         }
         $pdo->beginTransaction();
         try {
-            $pdo->prepare('UPDATE pins SET authorized_until = 0
-                           WHERE pin IN (SELECT pin FROM card_uses WHERE card_id = ?)')->execute([$id]);
+            AuthGate::sealByCard((int) $id);
             $pdo->prepare('DELETE FROM card_uses WHERE card_id = ?')->execute([$id]);
             $pdo->prepare('DELETE FROM cards WHERE id = ?')->execute([$id]);
             $pdo->prepare('INSERT INTO audit(ts, admin, action, target, ip, detail) VALUES(?,?,?,?,?,?)')
