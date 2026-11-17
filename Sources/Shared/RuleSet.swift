@@ -381,7 +381,10 @@ struct RuleSet {
     }
 
     /// 规则命中的地址区间（合并后，闭区间、升序、互不相交）
-    func blockedRanges() -> [(UInt32, UInt32)] {
+    ///
+    /// `coarsenTo`：把每个区间扩张到 2^(32-bits) 对齐边界，用于路由条数过多时
+    /// 降低补集碎片（代价是同一块里没列进规则的地址也会进隧道）。
+    func blockedRanges(coarsenTo bits: Int = 32) -> [(UInt32, UInt32)] {
         var list: [(UInt32, UInt32)] = segments.map { ($0.start, $0.end) }
         if !exactIPs.isEmpty {
             list.append(contentsOf: exactIPs.map { ($0, $0) })
@@ -402,6 +405,31 @@ struct RuleSet {
             }
         }
         out.append((curStart, curEnd))
+        return bits < 32 ? RuleSet.coarsen(out, to: bits) : out
+    }
+
+    /// 把区间对齐放大到 2^(32-bits) 的整块，再合并
+    private static func coarsen(_ ranges: [(UInt32, UInt32)],
+                                to bits: Int) -> [(UInt32, UInt32)] {
+        guard bits < 32, !ranges.isEmpty else { return ranges }
+        let step = UInt64(1) << UInt64(32 - bits)
+        var list: [(UInt32, UInt32)] = []
+        for (s, e) in ranges {
+            let a = UInt64(s) / step * step
+            let b = min(UInt64(UInt32.max), (UInt64(e) / step + 1) * step - 1)
+            list.append((UInt32(a), UInt32(b)))
+        }
+        list.sort { $0.0 < $1.0 }
+        var out: [(UInt32, UInt32)] = []
+        var cs = list[0].0, ce = list[0].1
+        for (s, e) in list.dropFirst() {
+            if UInt64(s) <= UInt64(ce) + 1 {
+                if e > ce { ce = e }
+            } else {
+                out.append((cs, ce)); cs = s; ce = e
+            }
+        }
+        out.append((cs, ce))
         return out
     }
 
@@ -410,8 +438,9 @@ struct RuleSet {
     /// - `forceInside`：必须留在隧道里的地址（DNS 代理、黑洞地址）。
     ///   它们在补集里被挖掉，否则系统会把 DNS 查询送回物理网络，整条链就断了。
     /// - `maxRoutes`：补集 CIDR 太多时退回保守方案，避免网络设置装不下起不来。
-    func routePlan(forceInside: [UInt32] = [], maxRoutes: Int = 2600) -> RoutePlan {
-        let blocked = blockedRanges()
+    func routePlan(forceInside: [UInt32] = [], maxRoutes: Int = 2600,
+                   coarsenTo bits: Int = 32) -> RoutePlan {
+        let blocked = blockedRanges(coarsenTo: bits)
 
         guard !blocked.isEmpty else {
             // 没有 IP 规则：只接管 DNS，别的都别碰
