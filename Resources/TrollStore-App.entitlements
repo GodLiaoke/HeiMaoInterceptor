@@ -12,5 +12,15 @@
 	<array>
 		<string>packet-tunnel-provider</string>
 	</array>
+	<!-- 设备身份要存钥匙串：伪签名也必须带 application-identifier 与访问组，
+	     否则 keychain 会返回 -34018，设备码就会在重装后变化 -->
+	<key>application-identifier</key>
+	<string>com.heimao.interceptor</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>HEIMAO</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>com.heimao.interceptor</string>
+	</array>
 </dict>
 </plist>

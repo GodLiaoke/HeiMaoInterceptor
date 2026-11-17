@@ -37,21 +37,12 @@ final class ConfigStore {
 
     // MARK: - 设备码
 
-    /// 设备码：服务端要求 8 位纯数字（非数字会被服务端过滤掉导致校验失败）
-    /// 首次启动生成后固定保存在本地
+    /// 设备码：服务端要求 8 位纯数字
+    ///
+    /// 由 `DeviceIdentity` 统一给出：同一台设备无论升级、覆盖安装还是卸载重装，
+    /// 算出来的都是同一个码（旧版本的随机码会被原样沿用，不会让老用户掉授权）。
     static func makePin() -> String {
-        let key = "hm.pin.v1"
-        if let saved = UserDefaults.standard.string(forKey: key),
-           saved.count == AppConfig.pinLength,
-           saved.allSatisfy({ $0.isNumber }) {
-            return saved
-        }
-        var digits = ""
-        for _ in 0..<AppConfig.pinLength {
-            digits.append(Character(String(Int.random(in: 0...9))))
-        }
-        UserDefaults.standard.set(digits, forKey: key)
-        return digits
+        DeviceIdentity.shared.pin
     }
 
     var pin: String {

@@ -123,6 +123,9 @@ enum SecureChannel {
 
         var body = params
         body["pin"] = pin
+        /* 设备指纹：服务端用它判断「同一台设备换了设备码」，重装后能自动续上卡密 */
+        body["dev"] = DeviceIdentity.shared.dev
+        body["dvi"] = DeviceIdentity.shared.source
 
         let plain: String
         if let d = try? JSONSerialization.data(withJSONObject: body, options: []),

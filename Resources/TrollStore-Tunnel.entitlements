@@ -12,5 +12,10 @@
 	</array>
 	<key>com.apple.security.network.client</key>
 	<true/>
+	<!-- 与主程序同一应用标识，扩展才能被系统正常加载 -->
+	<key>application-identifier</key>
+	<string>com.heimao.interceptor.tunnel</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>HEIMAO</string>
 </dict>
 </plist>
