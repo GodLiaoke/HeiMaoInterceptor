@@ -7,53 +7,70 @@ import Foundation
 /// 丢了以后 App 侧只能拿到空字典，表现就是「拦截明明在生效，面板全是 0」。
 ///
 /// 所以扩展每 2 秒把快照落一份盘，App 拿不到回包就直接读这份。
-/// 落盘位置按优先级：
-///   1. App Group 共享容器（标准做法）
-///   2. /var/mobile/Library/Caches（巨魔 / 平台应用环境，双方都能写）
-///   3. UserDefaults(suiteName:)（前两条都不可写时的兜底）
+///
+/// 落盘为什么是「全部候选路径各写一份」而不是「写成功一个就走」：
+/// 扩展和主程序是两个进程、两套沙盒。App Group 容器只有真的拿到 group
+/// entitlement 时才共享，TrollStore 伪签名场景下经常拿得到一个路径却写不进去；
+/// 以前第一个路径写失败就退到 UserDefaults(suiteName:)，那个域在两个进程里
+/// 各是一份，等于写了个只有自己看得见的文件 —— App 侧永远是 0。
+/// 现在所有候选都写，App 读的时候取 bridgeAt 最新的那一份。
 enum StatsBridge {
 
     private static let groupID = "group.com.heimao.interceptor"
     private static let fileName = "hm-stats.json"
     private static let defaultsKey = "hm.stats.bridge"
-    private static let fallbackDir = "/var/mobile/Library/Caches/com.heimao.interceptor"
+    /// 巨魔 / 平台应用环境：主程序和扩展都能读写的公共缓存目录
+    private static let sharedDir = "/var/mobile/Library/Caches/com.heimao.interceptor"
+
+    // MARK: - 写
 
     static func write(_ payload: [String: Any]) {
         guard JSONSerialization.isValidJSONObject(payload),
               let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
 
-        if let url = fileURL(create: true, mustExist: false) {
-            do {
-                try data.write(to: url, options: .atomic)
-                return
-            } catch {
-                /* 写不进去就继续走后面的兜底 */
-            }
+        /* 每个候选路径都写一遍，不因为第一个成功就收手：
+           App 和扩展对「哪个目录可写」的判断可能不一样。 */
+        for url in writeTargets() {
+            try? data.write(to: url, options: .atomic)
         }
+
         if let d = UserDefaults(suiteName: groupID) {
             d.set(data, forKey: defaultsKey)
             d.synchronize()
-            return
         }
         UserDefaults.standard.set(data, forKey: defaultsKey)
     }
 
+    // MARK: - 读
+
     static func read() -> [String: Any] {
-        if let url = fileURL(create: false, mustExist: true),
-           let data = try? Data(contentsOf: url),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return obj
+        var best: [String: Any] = [:]
+        var bestAt = Int.min
+
+        for url in readTargets() {
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let at = (obj["bridgeAt"] as? Int) ?? 0
+            if at > bestAt {
+                bestAt = at
+                best = obj
+            }
         }
-        if let d = UserDefaults(suiteName: groupID),
-           let data = d.data(forKey: defaultsKey),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return obj
+        if !best.isEmpty { return best }
+
+        for d in [UserDefaults(suiteName: groupID), UserDefaults.standard] {
+            guard let d = d,
+                  let data = d.data(forKey: defaultsKey),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            let at = (obj["bridgeAt"] as? Int) ?? 0
+            if at > bestAt {
+                bestAt = at
+                best = obj
+            }
         }
-        if let data = UserDefaults.standard.data(forKey: defaultsKey),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            return obj
-        }
-        return [:]
+        return best
     }
 
     /// 扩展是否还活着（快照 10 秒内写过）
@@ -62,25 +79,36 @@ enum StatsBridge {
         return abs(Int(Date().timeIntervalSince1970) - at) <= 10
     }
 
-    private static func fileURL(create: Bool, mustExist: Bool) -> URL? {
-        let fm = FileManager.default
-        var dirs: [URL] = []
-        if let g = fm.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
-            dirs.append(g.appendingPathComponent("Library/Caches", isDirectory: true))
-        }
-        dirs.append(URL(fileURLWithPath: fallbackDir, isDirectory: true))
+    /// 快照距今多少秒（给界面显示「扩展多久没写盘了」）
+    static func age(_ payload: [String: Any]) -> Int? {
+        guard let at = payload["bridgeAt"] as? Int, at > 0 else { return nil }
+        return abs(Int(Date().timeIntervalSince1970) - at)
+    }
 
-        for dir in dirs {
-            if create {
-                try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            }
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: dir.path, isDirectory: &isDir), isDir.boolValue else { continue }
-            let url = dir.appendingPathComponent(fileName)
-            if !mustExist || fm.fileExists(atPath: url.path) {
-                return url
-            }
+    // MARK: - 候选路径
+
+    private static func writeTargets() -> [URL] {
+        var out: [URL] = []
+        let fm = FileManager.default
+        if let g = fm.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
+            let dir = g.appendingPathComponent("Library/Caches", isDirectory: true)
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            out.append(dir.appendingPathComponent(fileName))
         }
-        return nil
+        for dir in [sharedDir, NSTemporaryDirectory()] {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            out.append(URL(fileURLWithPath: dir, isDirectory: true).appendingPathComponent(fileName))
+        }
+        return out
+    }
+
+    private static func readTargets() -> [URL] {
+        var out: [URL] = []
+        if let g = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
+            out.append(g.appendingPathComponent("Library/Caches", isDirectory: true)
+                .appendingPathComponent(fileName))
+        }
+        out.append(URL(fileURLWithPath: sharedDir, isDirectory: true).appendingPathComponent(fileName))
+        return out
     }
 }

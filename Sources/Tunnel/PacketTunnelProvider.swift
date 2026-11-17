@@ -24,6 +24,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 统计落盘定时器：sendProviderMessage 丢回包时 App 靠这份兜底
     private var statsTimer: DispatchSourceTimer?
     private var stopReason = ""
+    /// 当前阶段：starting / running / stopped:原因 / failed:原因
+    /// App 那边靠它判断隧道卡在哪一步，不用再靠猜
+    private var phase = "idle"
     /// 周期校验连续失败次数：连着三次连不上服务端，就当链路断了，自己断开
     private var verifyFails = 0
 
@@ -37,41 +40,49 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pin  = (conf["pin"] as? String) ?? ""
         code = (conf["code"] as? String) ?? ""
 
-        // 1. 本地兜底：卡密到期时间（不是在线窗口）
-        let now = Date().timeIntervalSince1970
-        let expireAt = (conf["expireAt"] as? Double) ?? 0
-        if expireAt > 0 && expireAt < now {
-            completionHandler(TunnelError.licenseExpired)
-            return
-        }
-
-        // 2. 向服务端确认这张卡现在还能不能用（卡密被作废在这一步拦下）
-        verifyOrStart(conf: conf, completionHandler: completionHandler)
-    }
-
-    /// 启动前校验：服务端说不能用了就直接失败；网络不通则按本地宽限放行
-    private func verifyOrStart(conf: [String: Any],
-                               completionHandler: @escaping (Error?) -> Void) {
         guard !pin.isEmpty else {
+            phase = "failed:no_pin"
+            StatsBridge.write(statsPayload())
             completionHandler(TunnelError.missingConfiguration)
             return
         }
 
+        /* 心跳从第一毫秒就开始写：App 侧靠它判断「扩展到底起没起、卡在哪一步」。
+           以前只有隧道设置成功之后才写统计，隧道起不来时 App 什么都读不到，
+           面板全 0，分不清「没流量」和「根本没启动」。 */
+        phase = "starting"
+        startStatsPublisher()
+
+        // 1. 本地兜底：卡密到期时间（不是在线窗口）
+        let now = Date().timeIntervalSince1970
+        let expireAt = (conf["expireAt"] as? Double) ?? 0
+        if expireAt > 0 && expireAt < now {
+            phase = "failed:license_expired"
+            StatsBridge.write(statsPayload())
+            completionHandler(TunnelError.licenseExpired)
+            return
+        }
+
+        /* 2. 启动路径上不等网络。
+           以前这里先 POST 一次授权校验才开始建隧道，通道请求超时 12 秒、
+           资源超时 25 秒；网络差的时候会把 iOS 给隧道扩展的启动窗口耗光，
+           系统直接判 provider 超时并杀掉扩展 —— 表现就是「开了跟没开一样」。
+           现在先把隧道和应用设置起来（毫秒级完成），授权校验挪到隧道起来之后异步做，
+           不通过就断开（dropProtection）。 */
+        proceed(conf: conf, completionHandler: completionHandler)
+    }
+
+    /// 隧道起来之后再核一次授权（不阻塞启动）。
+    /// 服务端说不能用就断开；网络不通就按本地宽限放行，等下一次心跳。
+    private func verifyAfterStart() {
+        guard !pin.isEmpty else { return }
         SecureChannel.post(Obfs.s(23), params: [:], pin: pin) { [weak self] result in
             guard let self = self else { return }
-            switch result {
-            case .success(let obj):
-                let ok = (obj["authorized"] as? Bool) ?? false
-                if !ok {
-                    let reason = (obj["reason"] as? String) ?? "unknown"
-                    completionHandler(TunnelError.licenseInvalid(reason))
-                    return
-                }
-                self.proceed(conf: conf, completionHandler: completionHandler)
-
-            case .failure:
-                /* 断网：本地还有效就放行（App 侧会在联网后补校验） */
-                self.proceed(conf: conf, completionHandler: completionHandler)
+            guard case .success(let obj) = result else { return }
+            let ok = (obj["authorized"] as? Bool) ?? false
+            if !ok {
+                let reason = (obj["reason"] as? String) ?? "unknown"
+                self.dropProtection(reason: reason)
             }
         }
     }
@@ -116,6 +127,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         /* 规则一条都没解析出来就别开隧道：开了也拦不住任何东西，
            反而让用户以为防护生效了。 */
         guard !parsed.isEmpty else {
+            phase = "failed:rules_empty"
+            StatsBridge.write(statsPayload())
             completionHandler(TunnelError.ruleSetEmpty)
             return
         }
@@ -163,6 +176,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func applyRoutePlan(_ plans: [RuleSet.RoutePlan], mtu: Int, index: Int = 0,
                                 completion: @escaping (Error?) -> Void) {
         guard index < plans.count else {
+            phase = "failed:route_setup"
+            StatsBridge.write(statsPayload())
             completion(TunnelError.routeSetupFailed); return
         }
         let plan = plans[index]
@@ -204,9 +219,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                                   sinkholeIP: sinkholeIP)
         self.engine = engine
         startedAt = Date()
+        phase = "running"
         engine.start()
         startVerifyLoop()
         startStatsPublisher()
+
+        /* 授权校验放到隧道跑起来之后，别挡着启动 */
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.verifyAfterStart()
+        }
 
         /* 保险：全接管方案如果被系统忽略了排除路由，用户会「上不了网」。
            启动 20 秒后看一眼统计，旁路包占了绝大多数就直接断开，
@@ -262,6 +283,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 卸载规则 + 停隧道：内存里的规则先清掉再断，断完这一份就不存在了
     private func dropProtection(reason: String) {
         stopReason = reason
+        phase = "stopped:\(reason)"
         /* 先把停下来那一刻的数字落盘，再拆引擎：
            否则定时器下一次写盘会把所有计数刷成 0，用户看到的就是「归零」 */
         StatsBridge.write(statsPayload())
@@ -283,6 +305,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
         payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
         payload["routes"] = routeInfo
+        payload["phase"] = phase
         /* 注意：这里必须是 dnsServer，不能写 dns。
            写成 dns 会把引擎回上来的 DNS 查询计数覆盖成地址字符串，
            App 侧 as? Int 读到 nil，DNS 那一格永远是 0。 */
@@ -318,6 +341,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         statsTimer?.cancel()
         statsTimer = nil
         stopReason = "stopped"
+        phase = "stopped"
         /* 在引擎还活着时落最后一份：App 下一次轮询还能把停止前的数字读出来 */
         StatsBridge.write(statsPayload())
         verifyTimer?.cancel()

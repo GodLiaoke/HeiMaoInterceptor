@@ -606,15 +606,24 @@ final class AppModel: ObservableObject {
         return 0
     }
 
-    /// 拦截链路自检：隧道收包 / DNS 查询 / 旁路包 / 路由方案
-    /// 收包一直是 0 = 系统流量没进隧道；DNS 是 0 = DNS 没接管；旁路在涨 = 路由补集没生效
+    /// 拦截链路自检：隧道收包 / DNS 查询 / 拦截数 / 路由方案 / 扩展心跳
+    /// 收包 0 = 系统流量没进隧道；DNS 0 = DNS 没接管；心跳不新鲜 = 扩展没在跑
     var diagText: String {
+        guard !stats.isEmpty else {
+            return tunnel.isConnected
+                ? "隧道已连接，但扩展没回传统计（通道断了，不是没流量）"
+                : "隧道未连接"
+        }
         let tunnelPackets = num("tunnel")
         let dns = num("dns")
+        let blocked = num("blocked")
         let stray = num("stray")
+        let phase = (stats["phase"] as? String) ?? "running"
         let routes = (stats["routes"] as? String) ?? "—"
-        let detail = "收包 \(tunnelPackets) · DNS \(dns) · 旁路 \(stray) · \(routes)"
-        return detail + " · " + statsSource
+        var line = "收包 \(tunnelPackets) · DNS \(dns) · 拦截 \(blocked)"
+        if stray > 0 { line += " · 旁路 \(stray)" }
+        if let age = StatsBridge.age(stats) { line += " · 心跳 \(age)秒前" }
+        return line + " · \(phase) · \(routes) · \(statsSource)"
     }
 
     var blockedText: String { "\(num("blocked"))" }

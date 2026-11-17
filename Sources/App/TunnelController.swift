@@ -9,6 +9,8 @@ final class TunnelController: ObservableObject {
 
     @Published private(set) var status: NEVPNStatus = .invalid
     @Published private(set) var lastError: String?
+    /// 最近一次统计拉取的失败原因（只用于排查，不弹给用户）
+    private(set) var lastStatsError: String?
 
     private var manager: NETunnelProviderManager?
     private var observer: NSObjectProtocol?
@@ -49,10 +51,31 @@ final class TunnelController: ObservableObject {
         NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
             guard let self = self else { return }
             DispatchQueue.main.async {
-                self.manager = managers?.first
+                self.manager = TunnelController.pick(managers)
                 self.status = self.manager?.connection.status ?? .invalid
             }
         }
+    }
+
+    /// 从系统里的 VPN 配置里挑出「正在用的那一条」
+    ///
+    /// 以前一律取 `managers.first`。设备上只要残留过一条旧配置（重装、改过
+    /// bundle id、手动新建过都会留下），拿到的就可能是那条早就断开的配置：
+    /// 拦截照旧在另一条上跑，而统计永远问一条不存在的隧道 —— 表现就是
+    /// 「拦得住、数字全 0」。现在优先取在连接/恢复中的，其次取 bundle id 对得上的。
+    static func pick(_ managers: [NETunnelProviderManager]?) -> NETunnelProviderManager? {
+        guard let list = managers, !list.isEmpty else { return nil }
+        let live: [NEVPNStatus] = [.connected, .connecting, .reasserting, .disconnecting]
+        if let active = list.first(where: { live.contains($0.connection.status) }) {
+            return active
+        }
+        if let ours = list.first(where: {
+            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier
+                == AppConfig.tunnelBundleID
+        }) {
+            return ours
+        }
+        return list.first
     }
 
     // MARK: - 启动
@@ -71,7 +94,7 @@ final class TunnelController: ObservableObject {
                 return
             }
 
-            let manager = managers?.first ?? NETunnelProviderManager()
+            let manager = TunnelController.pick(managers) ?? NETunnelProviderManager()
             let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = AppConfig.tunnelBundleID
             proto.serverAddress = AppConfig.dnsProxyIP
@@ -156,10 +179,14 @@ final class TunnelController: ObservableObject {
     /// 拉统计
     ///
     /// `sendProviderMessage` 没有重传，扩展忙或系统切换网络时会一直不回调。
-    /// 这里加 1 秒硬超时，保证每次轮询一定有结果（拿不到就回空，上层读扩展落盘的快照）。
+    /// 这里加 2.5 秒硬超时，保证每次轮询一定有结果（拿不到就回空，上层读扩展落盘的快照）。
+    ///
+    /// 顺带修一处：以前 `session.status != .connected` 就直接返回空。
+    /// 隧道正在 reassert（切网）或者 manager 拿到的是另一条旧配置时，
+    /// 这一条 guard 会把统计通道整条掐死，面板永远 0。
+    /// 现在只要 manager 在就发一次，发不出去由 try? 吞掉，上层照样读落盘快照。
     func fetchStats(completion: @escaping ([String: Any]) -> Void) {
-        guard let session = manager?.connection as? NETunnelProviderSession,
-              session.status == .connected else {
+        guard let session = manager?.connection as? NETunnelProviderSession else {
             completion([:]); return
         }
 
@@ -173,16 +200,21 @@ final class TunnelController: ObservableObject {
             completion(obj)
         }
 
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.5) {
             finish([:])
         }
 
-        try? session.sendProviderMessage(Data("stats".utf8)) { data in
-            guard let data = data,
-                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                finish([:]); return
+        do {
+            try session.sendProviderMessage(Data("stats".utf8)) { data in
+                guard let data = data,
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    finish([:]); return
+                }
+                finish(obj)
             }
-            finish(obj)
+        } catch {
+            lastStatsError = error.localizedDescription
+            finish([:])
         }
     }
 }
