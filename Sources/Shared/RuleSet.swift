@@ -271,8 +271,13 @@ struct RuleSet {
 
     private static func normalise(_ s: String) -> String {
         var v = s.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        while v.hasPrefix("*.") { v.removeFirst(2) }
-        while v.hasPrefix(".") { v.removeFirst() }
+        // 订阅里常见的注解符号：@@||x^ / |x| / *.x
+        while v.hasPrefix("@@") || v.hasPrefix("||") || v.hasPrefix("|")
+                || v.hasPrefix("*.") || v.hasPrefix(".") {
+            if v.hasPrefix("@@") || v.hasPrefix("||") { v.removeFirst(2) }
+            else { v.removeFirst() }
+        }
+        while v.hasSuffix("^") || v.hasSuffix("|") || v.hasSuffix("*") { v.removeLast() }
         if v.hasSuffix(".") { v.removeLast() }
         // 常见前缀噪声
         for junk in ["https://", "http://", "www."] where v.hasPrefix(junk) {
