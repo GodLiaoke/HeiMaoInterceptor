@@ -356,31 +356,158 @@ struct RuleSet {
         return false
     }
 
-    /// 导出隧道需要的路由列表（不含 0.0.0.0/0，避免误伤正常流量）
-    func includedRoutes() -> [(String, Int)] {
-        var out: [(String, Int)] = []
-        for seg in segments {
-            let prefix = RuleSet.prefixLength(start: seg.start, end: seg.end)
-            out.append((RuleSet.uintToIP(seg.start), prefix))
+    // MARK: - 路由规划
+
+    /// 隧道路由方案
+    ///
+    /// iOS 的关键行为：**只有 split tunnel 时，系统经常不把 DNS 查询交给隧道**，
+    /// 表现就是「开了防护，域名规则一条都碰不到」。所以这里改成
+    /// 「默认路由指向隧道 + 把规则之外的地址排除出去」：
+    /// 系统认为隧道是默认出口 → DNS 设置一定生效；真正走隧道的只有规则 IP 段。
+    struct RoutePlan {
+        /// true = included 里放 0.0.0.0/0，靠 excluded 把非规则流量放回物理网络
+        var hijackAll = false
+        var included: [(String, Int)] = []
+        var excluded: [(String, Int)] = []
+        /// 补集太碎时退回「只接管规则段」
+        var degraded = false
+
+        var routeCount: Int { included.count + excluded.count }
+
+        var description: String {
+            if degraded { return "按规则段接管 \(included.count) 条" }
+            return "全接管 · 例外 \(excluded.count) 条"
         }
-        // 精确 IP 按 /32 下发
-        for ip in exactIPs.prefix(2000) {
-            out.append((RuleSet.uintToIP(ip), 32))
+    }
+
+    /// 规则命中的地址区间（合并后，闭区间、升序、互不相交）
+    func blockedRanges() -> [(UInt32, UInt32)] {
+        var list: [(UInt32, UInt32)] = segments.map { ($0.start, $0.end) }
+        if !exactIPs.isEmpty {
+            list.append(contentsOf: exactIPs.map { ($0, $0) })
+        }
+        guard !list.isEmpty else { return [] }
+        list.sort { $0.0 < $1.0 }
+
+        var out: [(UInt32, UInt32)] = []
+        var curStart = list[0].0
+        var curEnd = list[0].1
+        for (s, e) in list.dropFirst() {
+            let adjacent = curEnd != UInt32.max && UInt64(s) <= UInt64(curEnd) + 1
+            if adjacent {
+                if e > curEnd { curEnd = e }
+            } else {
+                out.append((curStart, curEnd))
+                curStart = s; curEnd = e
+            }
+        }
+        out.append((curStart, curEnd))
+        return out
+    }
+
+    /// 生成路由方案。
+    ///
+    /// - `forceInside`：必须留在隧道里的地址（DNS 代理、黑洞地址）。
+    ///   它们在补集里被挖掉，否则系统会把 DNS 查询送回物理网络，整条链就断了。
+    /// - `maxRoutes`：补集 CIDR 太多时退回保守方案，避免网络设置装不下起不来。
+    func routePlan(forceInside: [UInt32] = [], maxRoutes: Int = 2600) -> RoutePlan {
+        let blocked = blockedRanges()
+
+        guard !blocked.isEmpty else {
+            // 没有 IP 规则：只接管 DNS，别的都别碰
+            var plan = RoutePlan()
+            plan.included = forceInside.map { (RuleSet.uintToIP($0), 32) }
+            return plan
+        }
+
+        var outside = RuleSet.complement(of: blocked)
+        outside = RuleSet.removePoints(forceInside, from: outside)
+        let excluded = RuleSet.cidrs(from: outside)
+
+        if excluded.count > maxRoutes {
+            // 补集碎到系统可能装不下：退回「只把规则段拉进隧道」，
+            // 宁可 DNS 可能不生效，也不能让隧道起不来 / 用户断网。
+            var plan = RoutePlan()
+            plan.degraded = true
+            plan.included = RuleSet.cidrs(from: blocked)
+            plan.included.append(contentsOf: forceInside.map { (RuleSet.uintToIP($0), 32) })
+            return plan
+        }
+
+        var plan = RoutePlan()
+        plan.hijackAll = true
+        plan.included = [("0.0.0.0", 0)]
+        plan.excluded = excluded
+        return plan
+    }
+
+    /// 0.0.0.0/0 减去这些区间
+    private static func complement(of ranges: [(UInt32, UInt32)]) -> [(UInt32, UInt32)] {
+        var out: [(UInt32, UInt32)] = []
+        var cursor: UInt64 = 0
+        for (s, e) in ranges {
+            if UInt64(s) > cursor {
+                out.append((UInt32(cursor), s - 1))
+            }
+            let next = UInt64(e) + 1
+            cursor = max(cursor, next)
+            if cursor > UInt64(UInt32.max) { break }
+        }
+        if cursor <= UInt64(UInt32.max) {
+            out.append((UInt32(cursor), UInt32.max))
         }
         return out
     }
 
-    /// 由区间推前缀：区间是 2^n 对齐块时用 n，否则拆成 /32 兜底
-    private static func prefixLength(start: UInt32, end: UInt32) -> Int {
-        if start == end { return 32 }
-        var prefix = 32
-        while prefix > 0 {
-            let mask: UInt32 = prefix >= 32 ? 0xFFFFFFFF : (0xFFFFFFFF << UInt32(prefix)) & 0xFFFFFFFF
-            let hostMask = ~mask
-            if (start & hostMask) == 0 && (start | hostMask) == end { return prefix }
-            prefix -= 1
+    /// 把若干单点从区间里挖掉（用于强制把 DNS / 黑洞地址留在隧道内）
+    private static func removePoints(_ points: [UInt32],
+                                     from ranges: [(UInt32, UInt32)]) -> [(UInt32, UInt32)] {
+        guard !points.isEmpty else { return ranges }
+        var out: [(UInt32, UInt32)] = []
+        for (s, e) in ranges {
+            var pieces: [(UInt32, UInt32)] = [(s, e)]
+            for p in points {
+                var next: [(UInt32, UInt32)] = []
+                for (a, b) in pieces {
+                    if p < a || p > b { next.append((a, b)); continue }
+                    if a < p { next.append((a, p - 1)) }
+                    if p < b { next.append((p + 1, b)) }
+                }
+                pieces = next
+            }
+            out.append(contentsOf: pieces)
         }
-        return 0
+        return out
+    }
+
+    /// 区间 → CIDR（每块都是 2^n 对齐的最小集合，不会多覆盖一个地址）
+    static func cidrs(from ranges: [(UInt32, UInt32)]) -> [(String, Int)] {
+        var out: [(String, Int)] = []
+        for (start, end) in ranges {
+            var s = UInt64(start)
+            let e = UInt64(end)
+            while s <= e {
+                // s 这一位能覆盖多大（按对齐）
+                var alignSize = 32
+                if s != 0 {
+                    alignSize = 0
+                    while alignSize < 32 && (s & (UInt64(1) << UInt64(alignSize))) == 0 {
+                        alignSize += 1
+                    }
+                }
+                // 剩余跨度能覆盖多大
+                let span = e - s + 1
+                var spanSize = 0
+                while spanSize < 32 && (UInt64(1) << UInt64(spanSize + 1)) <= span {
+                    spanSize += 1
+                }
+                let size = min(alignSize, spanSize)
+                out.append((uintToIP(UInt32(s)), 32 - size))
+                s += (UInt64(1) << UInt64(size))
+                if size == 32 { break }
+            }
+        }
+        return out
     }
 
     static func uintToIP(_ v: UInt32) -> String {
