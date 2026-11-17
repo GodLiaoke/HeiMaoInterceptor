@@ -13,6 +13,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var ruleSet = RuleSet()
     private var dnsIP = AppConfig.dnsProxyIP
     private var clientIP = AppConfig.clientIP
+    private var sinkholeIP = AppConfig.sinkholeIP
     private var startedAt = Date()
 
     private var pin = ""
@@ -92,7 +93,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func begin(rulesText: String,
                        conf: [String: Any],
                        completionHandler: @escaping (Error?) -> Void) {
-        let parsed = RuleSet.parse(text: rulesText)
+        /* 几万条规则的解析放到后台队列，别堵着扩展的启动线程 */
+        WorkQueue.async { [weak self] in
+            let parsed = RuleSet.parse(text: rulesText)
+            WorkQueue.main {
+                guard let self = self else { return }
+                self.applyRules(parsed, conf: conf, completionHandler: completionHandler)
+            }
+        }
+    }
+
+    private func applyRules(_ parsed: RuleSet,
+                            conf: [String: Any],
+                            completionHandler: @escaping (Error?) -> Void) {
         /* 规则一条都没解析出来就别开隧道：开了也拦不住任何东西，
            反而让用户以为防护生效了。 */
         guard !parsed.isEmpty else {
@@ -102,6 +115,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         ruleSet = parsed
         dnsIP = (conf["dnsIP"] as? String) ?? AppConfig.dnsProxyIP
         clientIP = (conf["clientIP"] as? String) ?? AppConfig.clientIP
+        sinkholeIP = (conf["sinkholeIP"] as? String) ?? AppConfig.sinkholeIP
         let mtu = (conf["mtu"] as? Int) ?? AppConfig.mtu
 
         // 隧道网络参数：只接管规则 IP + DNS 代理地址，其它流量不碰
@@ -109,7 +123,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         settings.mtu = NSNumber(value: mtu)
 
         let ipv4 = NEIPv4Settings(addresses: [clientIP], subnetMasks: ["255.255.255.255"])
-        var routes: [NEIPv4Route] = [NEIPv4Route(destinationAddress: dnsIP, subnetMask: "255.255.255.255")]
+        var routes: [NEIPv4Route] = [
+            NEIPv4Route(destinationAddress: dnsIP, subnetMask: "255.255.255.255"),
+            /* 黑洞地址必须进隧道，否则命中的域名只是解析失败，拦断动作统计不到 */
+            NEIPv4Route(destinationAddress: sinkholeIP, subnetMask: "255.255.255.255"),
+        ]
         if let raw = conf["routes"] as? [[String: Any]] {
             for item in raw {
                 guard let ip = item["ip"] as? String else { continue }
@@ -134,7 +152,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             let engine = TunnelEngine(flow: self.packetFlow, rules: self.ruleSet,
-                                      dnsIP: self.dnsIP, clientIP: self.clientIP)
+                                      dnsIP: self.dnsIP, clientIP: self.clientIP,
+                                      sinkholeIP: self.sinkholeIP)
             self.engine = engine
             self.startedAt = Date()
             engine.start()
@@ -211,15 +230,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         if cmd.hasPrefix("rules:") {
             let text = String(cmd.dropFirst(6))
-            let newRules = RuleSet.parse(text: text)
-            /* 热更新失败时保留旧规则，不要因为一次坏包把防护清空 */
-            guard !newRules.isEmpty else {
-                completionHandler?(Data("reject".utf8))
-                return
+            WorkQueue.async { [weak self] in
+                guard let self = self else { return }
+                let newRules = RuleSet.parse(text: text)
+                WorkQueue.main {
+                    /* 热更新失败时保留旧规则，不要因为一次坏包把防护清空 */
+                    guard !newRules.isEmpty else {
+                        completionHandler?(Data("reject".utf8))
+                        return
+                    }
+                    self.ruleSet = newRules
+                    self.engine?.update(rules: newRules)
+                    completionHandler?(Data("ok".utf8))
+                }
             }
-            ruleSet = newRules
-            engine?.update(rules: newRules)
-            completionHandler?(Data("ok".utf8))
             return
         }
 

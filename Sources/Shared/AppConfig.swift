@@ -3,9 +3,9 @@ import Foundation
 /// 全局常量：服务端、隧道参数、品牌信息
 enum AppConfig {
 
-    static let appName        = "黑猫公益拦截"
-    static let appVersion     = "1.0"
-    static let buildNumber    = 102          // 1.0 build102（签名路径修复 / 界面重做 / 规则引擎）
+    static let appName        = "黑猫拦截 Pro"
+    static let appVersion     = "1.0.1"
+    static let buildNumber    = 103          // 1.0.1 build103（单开关 / 全后台校验 / 结果回主界面）
     static let apiBase        = "https://ios.ouovo.cc/api"
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
@@ -19,6 +19,9 @@ enum AppConfig {
     /// 隧道内部地址（与规则库解耦，只用于接管 DNS 与目标 IP）
     static let clientIP       = "10.111.0.2"
     static let dnsProxyIP     = "10.111.0.1"
+    /// 域名黑洞落地地址：命中的域名解析到这里，
+    /// 连接会进隧道当场被断掉（而不是让系统去连 0.0.0.0 干等超时）
+    static let sinkholeIP     = "10.111.0.9"
     static let prefixLength   = 32
     static let mtu            = 1500
 

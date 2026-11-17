@@ -47,8 +47,12 @@ enum DNSMessage {
                      qclass: qclass, questionEnd: offset, raw: data)
     }
 
-    /// 构造黑洞响应：域名解析到 0.0.0.0 / :: ，TTL 60
-    static func buildSinkhole(for q: Query) -> Data {
+    /// 构造黑洞响应：域名解析到指定的黑洞地址（默认由调用方给隧道内地址），TTL 60
+    ///
+    /// 返回隧道内的 sinkhole 地址（而不是 0.0.0.0）有两个好处：
+    ///   1. 连接会真的进隧道，被我们当场断掉，用户立刻看到失败，不用等系统超时
+    ///   2. 断掉的动作能被统计到，界面上的「HTTPS 拦断」才是真实数字
+    static func buildSinkhole(for q: Query, ip: UInt32) -> Data {
         var out = Data()
         var flags: UInt16 = 0x8000            // QR = 1
         flags |= (q.flags & 0x0100)           // 复制 RD
@@ -74,7 +78,7 @@ enum DNSMessage {
             out.append(be16(1))                        // CLASS IN
             out.append(be32bytes(60))                  // TTL
             out.append(be16(4))                        // RDLENGTH
-            out.append(contentsOf: [0, 0, 0, 0])       // 0.0.0.0
+            out.append(be32bytes(ip))                  // 黑洞地址
         }
         return out
     }

@@ -19,6 +19,7 @@ struct SettingsView: View {
                     licenseCard
                     deviceCard
                     rulesCard
+                    httpsCard
                     aboutCard
 
                     Text("公益免费 · \(AppConfig.channelName)")
@@ -71,10 +72,7 @@ struct SettingsView: View {
                 }
                 Spacer()
                 Button {
-                    model.loadAnnouncement()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-                        model.toast = "公告已刷新"
-                    }
+                    model.runQuickAction(.notice)
                 } label: {
                     Text("刷新")
                         .font(.system(size: 11.5, weight: .semibold, design: .rounded))
@@ -144,7 +142,7 @@ struct SettingsView: View {
                         }
 
                         Button {
-                            model.verifyNow { _ in }
+                            model.runQuickAction(.status)
                         } label: {
                             Text(model.verifying ? "校验中…" : "刷新状态")
                                 .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -223,9 +221,7 @@ struct SettingsView: View {
                     DividerLine()
                     HStack(spacing: 10) {
                         Button {
-                            model.verifyNow { ok in
-                                if ok { model.loadRules(force: true) }
-                            }
+                            model.runQuickAction(.rules)
                         } label: {
                             Text("同步云端规则")
                                 .font(.system(size: 12.5, weight: .semibold, design: .rounded))
@@ -236,8 +232,7 @@ struct SettingsView: View {
                                                 .fill(HK.cyan.opacity(0.12)))
                         }
                         Button {
-                            model.loadAnnouncement()
-                            model.toast = "公告已刷新"
+                            model.runQuickAction(.notice)
                         } label: {
                             Text("刷新公告")
                                 .font(.system(size: 12.5, weight: .semibold, design: .rounded))
@@ -253,6 +248,48 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - HTTPS 说明
+
+    private var httpsCard: some View {
+        VStack(spacing: 9) {
+            SectionHeader(title: "HTTPS 拦截", subtitle: "TLS")
+            GlassCard {
+                VStack(alignment: .leading, spacing: 11) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(HK.mint)
+                        Text("不需要安装证书")
+                            .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                            .foregroundColor(HK.mint)
+                        Spacer()
+                    }
+
+                    Text("本应用不破解 TLS 内容，所以不用装根证书、也不用在「关于本机」里信任描述文件。")
+                        .font(.system(size: 11.5, weight: .regular, design: .rounded))
+                        .foregroundColor(HK.textDim)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    DividerLine()
+
+                    HttpsRow(icon: "globe", title: "域名层",
+                             detail: "命中的域名直接在 DNS 阶段返回黑洞地址，HTTPS 根本连不上")
+                    HttpsRow(icon: "bolt.horizontal.fill", title: "连接层",
+                             detail: "连接黑洞地址的 TCP / UDP 在隧道内被当场断开，立刻失败而不是等超时")
+                    HttpsRow(icon: "antenna.radiowaves.left.and.right", title: "SNI 兜底",
+                             detail: "系统加密 DNS 被接管；仍走内置 DoH 的应用属于已知盲区")
+
+                    Text("要「看清页面内容、替换成拦截提示页」才需要中间人证书。那种做法要把每个网站的证书动态签出来，性能和隐私成本都很高，本应用不做。")
+                        .font(.system(size: 10.5, weight: .regular, design: .rounded))
+                        .foregroundColor(HK.textFaint)
+                        .lineSpacing(2.5)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
     // MARK: - 关于
 
     private var aboutCard: some View {
@@ -261,6 +298,7 @@ struct SettingsView: View {
             GlassCard {
                 VStack(spacing: 12) {
                     InfoRow(title: "应用", value: "\(AppConfig.appName) v\(AppConfig.appVersion)")
+                    InfoRow(title: "版本", value: "v\(AppConfig.appVersion) · build \(AppConfig.buildNumber)")
                     InfoRow(title: "兼容", value: "iOS 15.0 – iOS 27")
                     InfoRow(title: "内核", value: "Packet Tunnel · 用户态协议栈")
                     DividerLine()
@@ -293,6 +331,35 @@ extension View {
         ZStack(alignment: alignment) {
             placeholder().opacity(shouldShow ? 1 : 0)
             self
+        }
+    }
+}
+
+
+// MARK: - HTTPS 说明行
+
+private struct HttpsRow: View {
+    let icon: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: icon)
+                .font(.system(size: 10.5, weight: .bold))
+                .foregroundColor(HK.cyan)
+                .frame(width: 18, height: 18)
+                .background(Circle().fill(HK.cyan.opacity(0.12)))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                    .foregroundColor(HK.text)
+                Text(detail)
+                    .font(.system(size: 10.5, weight: .regular, design: .rounded))
+                    .foregroundColor(HK.textFaint)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
     }
 }

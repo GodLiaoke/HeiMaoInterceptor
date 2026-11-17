@@ -7,8 +7,10 @@ import CryptoKit
 ///   1. 传输层走 v3 加密通道（SecureChannel），抓包只有密文
 ///   2. 规则包本身再用「设备码 + 卡密 + 当日桶 + 版本」派生的密钥加密
 ///
-/// 不落盘：规则明文只存在于本进程内存，退出即消失。
-/// 密钥每天 UTC 0 点轮换，隔天旧密钥自动失效。
+/// 线程约定：
+///   - 下载完成后的「解密 → 校验 sha256 → 解析规则」全部在 WorkQueue 上跑
+///   - 解析结果缓存成 `parsed`，界面和隧道读缓存，不重复 parse
+///   - 只有回调碰界面时才切回主线程
 final class RuleService {
 
     static let shared = RuleService()
@@ -19,109 +21,162 @@ final class RuleService {
     private(set) var loadedAt: Date?
     private(set) var counts: (ips: Int, domains: Int) = (0, 0)
 
+    /// 解析结果缓存：界面、隧道、统计都读这一份
+    private(set) var parsed: RuleSet?
+
+    /// 解析结果的代号，用来判断缓存是否还新鲜
+    private var parsedFingerprint: String = ""
+
     private var loading = false
 
     private init() {}
 
     var isLoaded: Bool { text != nil }
 
+    /// 已解析的规则（没加载时返回空集合，调用方自己判 isEmpty）
+    var currentSet: RuleSet { parsed ?? RuleSet() }
+
     func clear() {
         text = nil
         version = ""
         loadedAt = nil
         counts = (0, 0)
+        parsed = nil
+        parsedFingerprint = ""
+    }
+
+    /// 把一段规则文本喂进来并解析（内存态，不落盘）
+    /// - Parameter force: 覆盖已有缓存。热更新时用 true。
+    @discardableResult
+    func adopt(text str: String, version v: String) -> RuleSet {
+        let set = RuleSet.parse(text: str)
+        text = str
+        version = v
+        loadedAt = Date()
+        counts = (set.summary.ips, set.domains.count)
+        parsed = set
+        parsedFingerprint = v
+        return set
     }
 
     /// 拉取规则。已经加载过且非强制时直接返回内存里的那份。
+    ///
+    /// 注意：`completion` 一定在主线程回调，但里面拿到的字符串
+    /// 已经在后台解密校验过，调用方不需要再做重活。
     func load(pin: String, code: String, force: Bool = false,
               completion: @escaping (Result<String, Error>) -> Void) {
 
-        let norm = CryptoBox.normaliseCode(code)
-        guard !pin.isEmpty, !norm.isEmpty else {
-            completion(.failure(LicenseError.invalidCode)); return
+        WorkQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            let norm = CryptoBox.normaliseCode(code)
+            guard !pin.isEmpty, !norm.isEmpty else {
+                WorkQueue.main { completion(.failure(LicenseError.invalidCode)) }
+                return
+            }
+            if !force, let cached = self.text {
+                WorkQueue.main { completion(.success(cached)) }
+                return
+            }
+            if self.loading {
+                WorkQueue.main {
+                    completion(.failure(LicenseError.badResponse("规则正在下载，稍等一下")))
+                }
+                return
+            }
+            self.loading = true
+
+            self.download(pin: pin, code: norm, completion: completion)
         }
-        if !force, let cached = text {
-            completion(.success(cached)); return
-        }
-        if loading {
-            completion(.failure(LicenseError.badResponse("规则正在下载，稍等一下"))); return
-        }
-        loading = true
+    }
+
+    /// 真正的两段下载 + 后台解密
+    private func download(pin: String, code: String,
+                          completion: @escaping (Result<String, Error>) -> Void) {
 
         SecureChannel.post("/rules/manifest",
-                           params: ["code": norm], pin: pin) { [weak self] result in
+                           params: ["code": code], pin: pin) { [weak self] result in
             guard let self = self else { return }
 
             switch result {
             case .failure(let err):
-                self.loading = false
-                completion(.failure(self.translate(err)))
+                WorkQueue.async {
+                    self.loading = false
+                    WorkQueue.main { completion(.failure(self.translate(err))) }
+                }
 
             case .success(let obj):
                 guard (obj["ok"] as? Bool) == true,
                       let version = obj["version"] as? String,
                       let bucket = obj["bucket"] as? String else {
-                    self.loading = false
                     let raw = (obj["error"] as? String) ?? ""
-                    completion(.failure(LicenseError.badResponse(self.mapError(raw))))
+                    WorkQueue.async {
+                        self.loading = false
+                        WorkQueue.main {
+                            completion(.failure(LicenseError.badResponse(self.mapError(raw))))
+                        }
+                    }
                     return
                 }
                 let wantSha = (obj["sha256"] as? String)?.lowercased() ?? ""
 
                 SecureChannel.post("/rules/download",
-                                   params: ["code": norm, "version": version],
+                                   params: ["code": code, "version": version],
                                    pin: pin) { r2 in
-                    guard case .success(let obj2) = r2 else {
-                        self.loading = false
-                        if case .failure(let e) = r2 {
-                            completion(.failure(self.translate(e)))
-                        }
-                        return
-                    }
-
-                    guard (obj2["ok"] as? Bool) == true,
-                          let blobB64 = obj2["blob"] as? String,
-                          let blob = Data(base64Encoded: blobB64) else {
-                        self.loading = false
-                        let raw = (obj2["error"] as? String) ?? ""
-                        completion(.failure(LicenseError.badResponse(self.mapError(raw))))
-                        return
-                    }
-
-                    let key = CryptoBox.deriveRuleKey(pin: pin, code: norm,
-                                                      bucket: bucket, version: version)
-                    guard let plain = try? CryptoBox.openRulePack(blob, key: key),
-                          let str = String(data: plain, encoding: .utf8) else {
-                        self.loading = false
-                        completion(.failure(LicenseError.crypto))
-                        return
-                    }
-
-                    if !wantSha.isEmpty {
-                        let got = SHA256.hash(data: plain)
-                            .map { String(format: "%02x", $0) }.joined()
-                        guard got == wantSha else {
+                    switch r2 {
+                    case .failure(let e):
+                        WorkQueue.async {
                             self.loading = false
-                            completion(.failure(LicenseError.crypto))
+                            WorkQueue.main { completion(.failure(self.translate(e))) }
+                        }
+
+                    case .success(let obj2):
+                        guard (obj2["ok"] as? Bool) == true,
+                              let blobB64 = obj2["blob"] as? String,
+                              let blob = Data(base64Encoded: blobB64) else {
+                            let raw = (obj2["error"] as? String) ?? ""
+                            WorkQueue.async {
+                                self.loading = false
+                                WorkQueue.main {
+                                    completion(.failure(LicenseError.badResponse(self.mapError(raw))))
+                                }
+                            }
                             return
                         }
-                    }
 
-                    let set = RuleSet.parse(text: str)
-                    guard !set.isEmpty else {
-                        self.loading = false
-                        completion(.failure(LicenseError.badResponse("云端规则为空")))
-                        return
-                    }
+                        /* 解密 + 校验 + 解析全在后台队列，主线程一点都不碰 */
+                        WorkQueue.async {
+                            let key = CryptoBox.deriveRuleKey(pin: pin, code: code,
+                                                              bucket: bucket, version: version)
+                            guard let plain = try? CryptoBox.openRulePack(blob, key: key),
+                                  let str = String(data: plain, encoding: .utf8) else {
+                                self.loading = false
+                                WorkQueue.main { completion(.failure(LicenseError.crypto)) }
+                                return
+                            }
 
-                    self.text = str
-                    self.version = version
-                    self.loadedAt = Date()
-                    self.counts = (set.summary.ips, set.domains.count)
-                    self.loading = false
+                            if !wantSha.isEmpty {
+                                let got = SHA256.hash(data: plain)
+                                    .map { String(format: "%02x", $0) }.joined()
+                                guard got == wantSha else {
+                                    self.loading = false
+                                    WorkQueue.main { completion(.failure(LicenseError.crypto)) }
+                                    return
+                                }
+                            }
 
-                    DispatchQueue.main.async {
-                        completion(.success(str))
+                            let set = self.adopt(text: str, version: version)
+                            guard !set.isEmpty else {
+                                self.loading = false
+                                WorkQueue.main {
+                                    completion(.failure(LicenseError.badResponse("云端规则为空")))
+                                }
+                                return
+                            }
+
+                            self.loading = false
+                            WorkQueue.main { completion(.success(str)) }
+                        }
                     }
                 }
             }

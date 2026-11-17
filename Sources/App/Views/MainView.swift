@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import Combine
 
 /// 主界面
 struct MainView: View {
@@ -23,6 +24,12 @@ struct MainView: View {
                                  updated: MainView.prettyTime(model.displayNotice.updatedAt),
                                  expanded: $model.announcementOpen)
                         .transition(.opacity.combined(with: .move(edge: .top)))
+
+                    // 设置里那些刷新动作的结果，统一回主界面显示
+                    if let msg = model.actionResult {
+                        ActionResultBanner(text: msg) { model.dismissActionResult() }
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
 
                     // 授权出问题就顶在最上面，讲清原因
                     if let alert = model.authAlert {
@@ -71,6 +78,10 @@ struct MainView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView().environmentObject(model)
+        }
+        // 设置里点了刷新：收起设置页，结果在主界面顶部看
+        .onReceive(model.$closeSettingsRequest.compactMap { $0 }) { _ in
+            withAnimation(.easeInOut(duration: 0.22)) { showSettings = false }
         }
         .alert("发现新版本", isPresented: $model.showUpdate) {
             Button("稍后", role: .cancel) { }
@@ -152,63 +163,45 @@ struct MainView: View {
     // MARK: - 主开关区
 
     private var hero: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 10) {
+            /* 整个 App 只有这一个开关：点圆球开、再点一次关 */
             PowerOrb(on: model.tunnel.isConnected,
                      busy: model.busy,
                      blocked: !model.authorized)
-                .opacity(appear ? 1 : 0)
-                .scaleEffect(appear ? 1 : 0.9)
+                .scaleEffect(appear ? (model.tunnel.isConnected ? 1.05 : 1.0) : 0.9)
+                .animation(.spring(response: 0.46, dampingFraction: 0.74),
+                           value: model.tunnel.isConnected)
+                .contentShape(Circle())
                 .onTapGesture {
-                    let impact = UIImpactFeedbackGenerator(style: .medium)
+                    let impact = UIImpactFeedbackGenerator(style: model.tunnel.isConnected ? .light : .medium)
                     impact.impactOccurred()
                     model.toggle()
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(model.tunnel.isConnected ? "关闭防护" : "开启防护")
+                .accessibilityAddTraits(.isButton)
 
-            VStack(spacing: 6) {
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 7, height: 7)
-                        .shadow(color: statusColor.opacity(0.8), radius: 6)
-                    Text(statusTitle)
-                        .font(.system(size: 14.5, weight: .bold, design: .rounded))
-                        .foregroundColor(statusColor)
-                }
-
-                Text(statusDetail)
-                    .font(.system(size: 11.5, weight: .regular, design: .rounded))
-                    .foregroundColor(HK.textFaint)
-                    .multilineTextAlignment(.center)
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: statusColor.opacity(0.8), radius: 6)
+                Text(statusTitle)
+                    .font(.system(size: 14.5, weight: .bold, design: .rounded))
+                    .foregroundColor(statusColor)
             }
+            .padding(.top, 2)
 
-            Button {
-                let impact = UIImpactFeedbackGenerator(style: .light)
-                impact.impactOccurred()
-                model.toggle()
-            } label: {
-                Text(model.tunnel.isConnected ? "关闭防护" : "开启防护")
-                    .font(.system(size: 13.5, weight: .bold, design: .rounded))
-                    .foregroundColor(model.tunnel.isConnected ? HK.text : HK.bg)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .background(
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .fill(model.tunnel.isConnected
-                                  ? AnyShapeStyle(Color.white.opacity(0.10))
-                                  : AnyShapeStyle(LinearGradient(colors: [HK.cyan, HK.blue],
-                                                                 startPoint: .leading,
-                                                                 endPoint: .trailing)))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .stroke(Color.white.opacity(model.tunnel.isConnected ? 0.18 : 0.0),
-                                            lineWidth: 0.8)
-                            )
-                    )
-                    .shadow(color: model.tunnel.isConnected ? .clear : HK.cyan.opacity(0.35),
-                            radius: 16, y: 6)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 20)
+            Text(statusDetail)
+                .font(.system(size: 11.5, weight: .regular, design: .rounded))
+                .foregroundColor(HK.textFaint)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 26)
+
+            Text(model.tunnel.isConnected ? "轻触圆球关闭防护" : "轻触圆球开启防护")
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundColor(HK.textFaint.opacity(0.75))
+                .padding(.top, 1)
         }
         .frame(maxWidth: .infinity)
     }
@@ -313,8 +306,8 @@ struct MainView: View {
             HStack(spacing: 10) {
                 StatTile(value: model.tcpText, label: "TCP 断链", tint: HK.pink,
                          icon: "bolt.horizontal.fill")
-                StatTile(value: model.udpText, label: "UDP 丢弃", tint: HK.mint,
-                         icon: "waveform.path.ecg")
+                StatTile(value: model.connText, label: "HTTPS 拦断", tint: HK.mint,
+                         icon: "lock.shield.fill")
             }
         }
     }
@@ -356,7 +349,7 @@ struct MainView: View {
 
     private var footer: some View {
         VStack(spacing: 6) {
-            Text("黑猫公益 · 永久免费 · 不采集任何流量内容")
+            Text("\(AppConfig.appName) · 公益免费 · 不采集任何流量内容")
                 .font(.system(size: 10.5, weight: .regular, design: .rounded))
                 .foregroundColor(HK.textFaint)
             Text("v\(AppConfig.appVersion) · build \(AppConfig.buildNumber)")
@@ -518,5 +511,53 @@ struct ForceUpdateView: View {
             )
             .padding(.horizontal, 28)
         }
+    }
+}
+
+// MARK: - 操作结果横幅（设置里的刷新结果都显示在这里）
+
+struct ActionResultBanner: View {
+    let text: String
+    var onClose: () -> Void = {}
+
+    private var isBusy: Bool {
+        text.hasSuffix("…") || text.contains("正在")
+    }
+
+    private var tint: Color {
+        if isBusy { return HK.cyan }
+        if text.contains("失败") || text.contains("失效") || text.contains("错误") { return HK.pink }
+        return HK.mint
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: isBusy ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill")
+                .font(.system(size: 13, weight: .bold))
+                .foregroundColor(tint)
+            Text(text)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundColor(HK.text)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(HK.textFaint)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.white.opacity(0.07)))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(tint.opacity(0.10))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(tint.opacity(0.30), lineWidth: 0.8)
+                )
+        )
     }
 }

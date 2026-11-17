@@ -11,6 +11,7 @@ final class TunnelEngine {
         var blockedDomains = 0
         var blockedTCP = 0
         var blockedUDP = 0
+        var blockedConn = 0
         var passedDNS = 0
         var startedAt = Date()
 
@@ -19,6 +20,7 @@ final class TunnelEngine {
              "domains": blockedDomains,
              "tcp": blockedTCP,
              "udp": blockedUDP,
+             "conn": blockedConn,
              "passed": passedDNS,
              "uptime": Int(Date().timeIntervalSince(startedAt))]
         }
@@ -32,6 +34,8 @@ final class TunnelEngine {
     private var rules: RuleSet
     private let dnsIPv4: UInt32
     private let clientIPv4: UInt32
+    /// 域名黑洞地址：命中的域名都解析到这里，连接一进来就断
+    private let sinkholeIPv4: UInt32
 
     private let stateQueue = DispatchQueue(label: "com.heimao.engine.state")
     private let dnsQueue = DispatchQueue(label: "com.heimao.engine.dns", attributes: .concurrent)
@@ -43,11 +47,13 @@ final class TunnelEngine {
         stateQueue.sync { stats.json }
     }
 
-    init(flow: NEPacketTunnelFlow, rules: RuleSet, dnsIP: String, clientIP: String) {
+    init(flow: NEPacketTunnelFlow, rules: RuleSet,
+         dnsIP: String, clientIP: String, sinkholeIP: String) {
         self.flow = flow
         self.rules = rules
         self.dnsIPv4 = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F0001
         self.clientIPv4 = RuleSet.ipToUInt(clientIP) ?? 0x0A6F0002
+        self.sinkholeIPv4 = RuleSet.ipToUInt(sinkholeIP) ?? 0x0A6F0009
     }
 
     func update(rules: RuleSet) {
@@ -81,6 +87,26 @@ final class TunnelEngine {
 
     private func handle(_ data: Data) {
         guard let p = PacketCodec.parse(data) else { return }
+
+        /* 域名黑洞：命中的域名解析到 sinkhole 地址，连接进来一律断掉。
+           HTTPS / QUIC 都在这里断，所以不需要解密 TLS，也不需要装证书。 */
+        if p.dstIP == sinkholeIPv4 {
+            if p.proto == 6, let tcp = p.tcp {
+                if let rst = PacketCodec.buildRST(for: p) { write([rst]) }
+                stateQueue.async {
+                    self.stats.blockedPackets += 1
+                    self.stats.blockedConn += 1
+                    self.stats.blockedTCP += 1
+                }
+            } else if p.proto == 17 {
+                stateQueue.async {
+                    self.stats.blockedPackets += 1
+                    self.stats.blockedConn += 1
+                    self.stats.blockedUDP += 1
+                }
+            }
+            return
+        }
 
         if p.proto == 17, let udp = p.udp {
             // DNS 走代理地址
@@ -133,7 +159,7 @@ final class TunnelEngine {
 
         let blocked = stateQueue.sync { rules.isDomainBlocked(query.qname) }
         if blocked {
-            let answer = DNSMessage.buildSinkhole(for: query)
+            let answer = DNSMessage.buildSinkhole(for: query, ip: sinkholeIPv4)
             let out = PacketCodec.buildUDP(src: dnsIPv4, dst: p.srcIP,
                                            srcPort: udp.dstPort, dstPort: udp.srcPort,
                                            payload: answer)
