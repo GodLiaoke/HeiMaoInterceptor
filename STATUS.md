@@ -31,6 +31,24 @@
    - 扩展从 `startTunnel` 第一毫秒起就写心跳，快照带 `phase`
      （starting / running / failed:原因 / stopped:原因）
 
+### 上线记录（2026-11-18 02:31 北京时间）
+
+- 包：`/dl/HeiMao_Pro_v1.0.9_build112_signed.ipa`（1,240,813 B，sha256 `07b2e010…ef04`）
+- 未签：`/dl/HeiMao_Pro_v1.0.9_build112_unsigned.ipa`（1,223,706 B，sha256 `21749ac8…3c63`）
+- 下载页自动取最新 build，已指向 1.0.9；两个地址实测 200、大小与源文件一致
+- 版本表 `app_versions`：1.0.9 / 112，`force_update` 保持 1，`min_version` 1.0.0
+- `/api/app/version` 实测：`update_available=true`、`force_update=true`、`latest=1.0.9/112`
+- 备份：`/root/app.db.bak_112_0230`
+- 传输：两包 xz 压缩后经命令通道分块 base64 推送（75 块），落地 sha256 与本地逐字节一致
+
+### 统计通道为什么必须走 App Documents
+
+`sendProviderMessage` 是官方通道，但它只能问「当前 manager 那条连接」；
+App Group 容器在 TrollStore 伪签名下经常拿得到路径却写不进去；
+`UserDefaults(suiteName:)` 在两个进程里各是一份，等于没共享。
+所以这次由主程序在 `providerConfiguration` 里带上自己的 Documents 路径，
+扩展照这个路径写 —— 容器是本 App 自己的，权限一定通。
+
 ### 诊断行现在长这样
 
 设置页最下面「拦截状态」：
