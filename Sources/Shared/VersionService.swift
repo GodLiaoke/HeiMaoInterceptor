@@ -25,7 +25,8 @@ final class VersionService {
         let device = pin.isEmpty ? "00000000" : pin
 
         SecureChannel.post("/app/version",
-                           params: ["platform": "ios", "current": current],
+                           params: ["platform": "ios", "current": current,
+                             "build": AppConfig.buildNumber],
                            pin: device) { result in
             guard case .success(let obj) = result else {
                 completion(false, false, nil); return
@@ -35,6 +36,14 @@ final class VersionService {
             guard hasUpdate, let latest = obj["latest"] as? [String: Any] else {
                 completion(false, false, nil); return
             }
+            /* 本地 build 已经不低于服务端最新版就别打扰用户：
+               服务端只按版本号字符串比，build 号更精确；
+               后台某条记录的版本号没跟上时，也不会把新包用户锁在更新弹窗里 */
+            if let latestBuild = latest["build"] as? Int,
+               latestBuild > 0, latestBuild <= AppConfig.buildNumber {
+                completion(false, false, nil); return
+            }
+
             let info = AppUpdateInfo(
                 version: (latest["version"] as? String) ?? "",
                 build: (latest["build"] as? Int) ?? 0,
