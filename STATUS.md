@@ -2,7 +2,53 @@
 
 ## 当前版本
 
-**v1.0.5 build 108**（2026-11-17 · 稳定设备码 / 重装不掉授权 / 下载页改版）
+**v1.0.6 build 109**（2026-11-17 · 关键代码混淆 / 运行环境自检 / 规则跟随防护生命周期）
+
+### 1.0.6 改了什么
+
+**防止 ipa 被拆改（这一轮主线）**
+
+- 常量表：服务端地址、通道主密钥、两套派生盐、黑洞地址改成运行时按位还原
+  （`Sources/Shared/Obfs.swift` 由 `Tools/gen_obfs.py` 生成，明文不进二进制，`strings` 搜不到）
+- 类型名混淆：构建期把 52 个自定义顶层类型改成无意义短名（`Tools/rename_types.py`），
+  映射表只留在流水线产物里；源码仓库仍可读
+- 产物去符号：`STRIP_INSTALLED_PRODUCT` / `DEPLOYMENT_POSTPROCESSING` / `GCC_SYMBOLS_PRIVATE_EXTERN`，关掉 loc strings
+- 运行环境自检（`Integrity`）：注入镜像、调试器附着、包结构被改（bundle id / 版本 / 扩展被删）三类留痕；
+  被调试时授权只留内存不落盘
+- 本地授权封条（`LicenseSeal`）：HMAC 覆盖整段授权数据，手改 UserDefaults 伪造「已授权」无效
+- 流水线加产物自检：二进制里还能搜到主密钥 / 域名 / 盐就标 `OBF_FAIL`
+
+**在线更新与卡密验证加固**
+
+- 强制更新「钉在本地」：判过一次必须更新就落盘，升级到位前一直有效，
+  这一次检查被 hook 成「无更新」也绕不过
+- 规则下发带 build；服务端可用 `rules_min_build` 做版本闸门（补丁已备好，未上线）
+- 开防护前强校验 + 隧道内每 5 分钟复查 + 规则包密钥由卡密派生（没卡密解不开包）
+
+**规则跟随防护生命周期**
+
+- 启动不再预拉规则；点开防护时才「拉取 → 解密 → 校验 → 进内存 → 起隧道」
+- 关防护立刻卸载内存里的规则，界面回到「未加载」
+- 隧道起不来也清掉刚下发的规则，不留空防护
+- 心跳连续 3 次失败（约 90 秒）→ 卸载规则 + 断开隧道
+- 隧道内周期校验连续 3 次失败 → 扩展自己卸载规则并断开
+- 设置页 / 规则页手动同步要求防护已开启，否则提示「开启防护后才会下发规则」
+
+**界面**
+
+- 规则详情删掉「多套规则会合并成一个加密包下发」整张说明卡
+- 设置页删掉「HTTPS 拦截 / 不需要安装证书」整张说明卡（含相关说明行）
+
+**功能库校验（客户端已带，服务端待上线）**
+
+- 7 个功能 × 5 条 CRC，全部取自真实实现输出：`crypto.sha256`、`crypto.hmac`、
+  `ruleset.parse`、`ruleset.match`、`license.code`、`license.verdict`、`core.const`
+- 随 `auth/check` 上报；服务端按「build + 功能」登记一条哈希（`server/god-live/app/Services/FeatureService.php`）
+- 服务端补丁 `server/deploy/api.php.feature`（功能校验 + 版本闸门）、建表
+  `server/god-live/sql/feature_checks.sql`、上线脚本 `server/deploy_feature_check.sh`
+- 默认只记账不阻断，先攒基线，零误报后再决定是否当门禁
+
+---
 
 ### 1.0.5 改了什么
 

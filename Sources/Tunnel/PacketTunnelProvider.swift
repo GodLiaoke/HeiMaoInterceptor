@@ -19,6 +19,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var pin = ""
     private var code = ""
     private var verifyTimer: DispatchSourceTimer?
+    /// 周期校验连续失败次数：连着三次连不上服务端，就当链路断了，自己断开
+    private var verifyFails = 0
 
     override func startTunnel(options: [String: NSObject]?,
                               completionHandler: @escaping (Error?) -> Void) {
@@ -179,15 +181,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         guard !pin.isEmpty else { return }
         SecureChannel.post(Obfs.s(23), params: [:], pin: pin) { [weak self] result in
             guard let self = self else { return }
-            guard case .success(let obj) = result else { return }   // 断网不处理
+
+            guard case .success(let obj) = result else {
+                /* 一次失败不动作；连续失败等于心跳断了，规则立刻作废并断开隧道 */
+                self.verifyFails += 1
+                if self.verifyFails >= 3 {
+                    self.verifyFails = 0
+                    self.dropProtection(reason: "heartbeat_lost")
+                }
+                return
+            }
+            self.verifyFails = 0
+
             let ok = (obj["authorized"] as? Bool) ?? false
             if !ok {
                 let reason = (obj["reason"] as? String) ?? "unknown"
-                /* 卡密中途失效：让系统把隧道停掉，App 回到前台会看到未授权 */
-                let err = TunnelError.licenseInvalid(reason)
-                self.cancelTunnelWithError(err)
+                self.dropProtection(reason: reason)
             }
         }
+    }
+
+    /// 卸载规则 + 停隧道：内存里的规则先清掉再断，断完这一份就不存在了
+    private func dropProtection(reason: String) {
+        ruleSet = RuleSet()
+        engine?.stop()
+        engine = nil
+        cancelTunnelWithError(TunnelError.licenseInvalid(reason))
     }
 
     override func stopTunnel(with reason: NEProviderStopReason,
@@ -196,6 +215,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         verifyTimer = nil
         engine?.stop()
         engine = nil
+        /* 关闭即卸载：不在扩展进程里留任何规则副本 */
+        ruleSet = RuleSet()
+        verifyFails = 0
         completionHandler()
     }
 

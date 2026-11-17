@@ -146,8 +146,9 @@ final class RuleService {
     private func download(pin: String, code: String,
                           completion: @escaping (Result<String, Error>) -> Void) {
 
+        /* 带 build 上来：服务端可以按最低版本闸门拒绝给老版本发规则 */
         SecureChannel.post(Obfs.s(26),
-                           params: ["code": code], pin: pin) { [weak self] result in
+                           params: ["code": code, "b": AppConfig.buildNumber], pin: pin) { [weak self] result in
             guard let self = self else { return }
 
             switch result {
@@ -269,6 +270,7 @@ final class RuleService {
         case "card_bound":     return "这张卡已绑定其他设备，请联系管理员解绑"
         case "card_format":    return "卡密格式不对"
         case "no_rules":       return "云端暂无可用规则"
+        case "update_required": return "当前版本已停止支持，请更新到最新版本"
         case "rate_limited":   return "请求太频繁，稍后再试"
         case "bad_pin":        return "设备码异常，请重装应用"
         case "":               return "规则下载失败，请重试"

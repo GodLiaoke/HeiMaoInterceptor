@@ -72,6 +72,8 @@ final class AppModel: ObservableObject {
     private var lastRenew = Date.distantPast
     private var verifyingNow = false
     private var switching = false
+    /// 心跳连续失败次数：到阈值就按「链路断了」处理，卸载规则并断开
+    private var renewFailures = 0
 
     /// 设置页里的刷新动作
     enum QuickAction {
@@ -114,7 +116,7 @@ final class AppModel: ObservableObject {
 
         /* 启动即强校验：不信任本地缓存，先问服务端（全程后台） */
         verifyNow()
-        bootstrapRules()
+        /* 规则不在启动时拉：只在开启防护的那一刻下发 */
         checkUpdate()
     }
 
@@ -136,17 +138,24 @@ final class AppModel: ObservableObject {
         cloudNotice = ConfigStore.shared.cloudNotice
     }
 
-    /// 有授权就把规则拉下来
-    private func bootstrapRules() {
-        guard ConfigStore.shared.isAuthorized else { return }
-        loadRules(force: false)
-    }
-
-    func loadRules(force: Bool) {
+    /// 规则只在防护开启的过程中下发
+    ///
+    /// `requireTunnel` 为 true（设置页 / 规则页手动同步）时，隧道没跑就先拒绝；
+    /// 开关流程本身是「先拉规则再起隧道」，所以内部调用传 false。
+    func loadRules(force: Bool,
+                   requireTunnel: Bool = true,
+                   completion: ((Bool) -> Void)? = nil) {
+        if requireTunnel && !tunnel.isConnected {
+            rulesError = "开启防护后才会下发规则"
+            if force { publishResult("开启防护后才会下发规则") }
+            completion?(false)
+            return
+        }
         let pin = ConfigStore.shared.pin
         let code = ConfigStore.shared.license.code
         guard !code.isEmpty else {
             rulesError = "需要先激活卡密"
+            completion?(false)
             return
         }
         rulesLoading = true
@@ -169,11 +178,13 @@ final class AppModel: ObservableObject {
                     let sets = self.ruleSets.isEmpty ? "" : " · \(self.ruleSetCount) 套：\(self.ruleSets.joined(separator: " / "))"
                     self.publishResult("规则已更新\(sets)（\(detail)）")
                 }
+                completion?(true)
             case .failure(let err):
                 self.rulesError = err.localizedDescription
                 if force {
                     self.publishResult("规则更新失败：\(err.localizedDescription)")
                 }
+                completion?(false)
             }
         }
     }
@@ -249,8 +260,6 @@ final class AppModel: ObservableObject {
                     snapshot = lic
                 }
 
-                let needRules = ok && !RuleService.shared.isLoaded
-
                 WorkQueue.main {
                     self.verifyingNow = false
                     self.verifying = false
@@ -264,8 +273,9 @@ final class AppModel: ObservableObject {
                     if !ok {
                         self.refreshRules()
                         if self.tunnel.isConnected { self.tunnel.stop() }
-                    } else if needRules {
-                        self.loadRules(force: false)
+                    } else if ok && self.tunnel.isConnected && !RuleService.shared.isLoaded {
+                        /* 只有隧道在跑才需要规则；没开防护就不下发 */
+                        self.loadRules(force: false, requireTunnel: false)
                     }
                     completion?(ok)
                 }
@@ -297,9 +307,8 @@ final class AppModel: ObservableObject {
                         self.authAlert = nil
                         self.showLicense = false
                         self.licenseInput = ""
-                        self.publishResult("授权成功，有效期至 \(st.expireText)")
+                        self.publishResult("授权成功，有效期至 \(st.expireText) · 开启防护后自动下发规则")
                         self.closeSettingsRequest = UUID()
-                        self.loadRules(force: true)
                     }
 
                 case .failure(let err):
@@ -330,8 +339,6 @@ final class AppModel: ObservableObject {
                     ConfigStore.shared.applySession(st, pin: pin, code: code)
                     let lic = ConfigStore.shared.license
                     let ok = lic.isUsable()
-                    /* 续期本身不动规则；只有内存里一份都没有时才补拉 */
-                    let needRules = ok && !RuleService.shared.isLoaded
                     if !ok { RuleService.shared.clear() }
 
                     WorkQueue.main {
@@ -345,7 +352,10 @@ final class AppModel: ObservableObject {
                             if !silent { self.publishResult("授权已失效：\(lic.blockReason)") }
                             return
                         }
-                        if needRules { self.loadRules(force: true) }
+                        self.renewFailures = 0
+                        if ok && self.tunnel.isConnected && !RuleService.shared.isLoaded {
+                            self.loadRules(force: false, requireTunnel: false)
+                        }
                     }
 
                 case .failure(let err):
@@ -370,11 +380,23 @@ final class AppModel: ObservableObject {
                             self.license = lic
                             self.authorized = false
                             self.authAlert = lic.blockReason
+                            RuleService.shared.clear()
                             self.refreshRules()
                             if self.tunnel.isConnected { self.tunnel.stop() }
+                            self.renewFailures = 0
                             if !silent { self.publishResult("授权已失效：\(lic.blockReason)") }
-                        } else if !silent {
-                            self.toast = err.localizedDescription
+                        } else {
+                            /* 心跳连续失败到阈值：按链路断了处理，卸载规则并断开隧道 */
+                            self.renewFailures += 1
+                            if self.renewFailures >= 3 {
+                                self.renewFailures = 0
+                                RuleService.shared.clear()
+                                self.refreshRules()
+                                if self.tunnel.isConnected { self.tunnel.stop() }
+                                self.publishResult("心跳连续失败，防护已断开")
+                            } else if !silent {
+                                self.toast = err.localizedDescription
+                            }
                         }
                     }
                 }
@@ -446,19 +468,17 @@ final class AppModel: ObservableObject {
         guard !switching else { completion(); return }
 
         if tunnel.isConnected {
+            /* 关防护 = 立刻把规则从内存里卸掉，不留在设备上 */
             tunnel.stop()
+            RuleService.shared.clear()
+            refreshRules()
+            publishResult("防护已关闭，云端规则已卸载")
             completion()
             return
         }
         guard !ConfigStore.shared.license.code.isEmpty else {
             showLicense = true
             toast = "请先激活卡密"
-            completion()
-            return
-        }
-        guard RuleService.shared.isLoaded else {
-            toast = rulesError ?? "云端规则还没加载好，稍等一下再开"
-            loadRules(force: false)
             completion()
             return
         }
@@ -479,19 +499,33 @@ final class AppModel: ObservableObject {
                 completion()
                 return
             }
-            self.tunnel.start { result in
-                WorkQueue.main {
+            /* 规则只在这一刻下发：拉取 → 解密 → 校验 → 进内存，然后才起隧道。
+               拉不到就不开防护，避免出现「隧道在跑但规则是空的」这种假防护。 */
+            self.loadRules(force: false, requireTunnel: false) { loaded in
+                guard loaded else {
                     self.switching = false
                     self.busy = false
-                    switch result {
-                    case .success:
-                        if let notice = ConfigStore.shared.cloudNotice, !notice.isEmpty {
-                            self.toast = notice
-                        }
-                    case .failure(let err):
-                        self.toast = "启动失败：\(err.localizedDescription)"
-                    }
+                    self.publishResult(self.rulesError ?? "规则下发失败，防护未开启")
                     completion()
+                    return
+                }
+                self.tunnel.start { result in
+                    WorkQueue.main {
+                        self.switching = false
+                        self.busy = false
+                        switch result {
+                        case .success:
+                            if let notice = ConfigStore.shared.cloudNotice, !notice.isEmpty {
+                                self.toast = notice
+                            }
+                        case .failure(let err):
+                            /* 隧道没起来，规则也别留在内存里 */
+                            RuleService.shared.clear()
+                            self.refreshRules()
+                            self.toast = "启动失败：\(err.localizedDescription)"
+                        }
+                        completion()
+                    }
                 }
             }
         }
@@ -500,12 +534,34 @@ final class AppModel: ObservableObject {
     // MARK: - 版本
 
     func checkUpdate() {
+        /* 强制更新一旦判下来就先钉在本地：只要没真的升到那个版本，
+           这一次检查哪怕被 hook 成「无更新」，界面照样锁在更新页。
+           真正的兜底在服务端：低于最低 build 的客户端拿不到规则包。 */
+        if UpdatePin.build > AppConfig.buildNumber {
+            updateInfo = UpdatePin.info()
+            forceUpdate = true
+        }
+
         VersionService.shared.check(pin: pin) { [weak self] hasUpdate, force, info in
             guard let self = self else { return }
             WorkQueue.main {
+                if hasUpdate, force, let info = info {
+                    UpdatePin.pin(info)
+                    self.updateInfo = info
+                    self.forceUpdate = true
+                    return
+                }
+                if let info = info, info.build > 0, AppConfig.buildNumber >= info.build {
+                    UpdatePin.clear()
+                }
+                if UpdatePin.build > AppConfig.buildNumber {
+                    self.updateInfo = UpdatePin.info()
+                    self.forceUpdate = true
+                    return
+                }
                 self.updateInfo = info
-                self.forceUpdate = hasUpdate && force
-                if hasUpdate && !force { self.showUpdate = true }
+                self.forceUpdate = false
+                if hasUpdate { self.showUpdate = true }
             }
         }
     }
@@ -535,5 +591,44 @@ final class AppModel: ObservableObject {
 
     func dismissToast() {
         toast = nil
+    }
+}
+
+/// 强制更新的本地钉子
+///
+/// 判过一次「必须更新」就落盘，升级到位之前一直有效。
+/// 目的很直接：把这次检查 hook 掉、或者断网，都绕不过已经记下来的结论。
+private enum UpdatePin {
+
+    private static let buildKey  = "hm.update.forceBuild"
+    private static let verKey    = "hm.update.forceVersion"
+    private static let urlKey    = "hm.update.forceURL"
+    private static let notesKey  = "hm.update.forceNotes"
+
+    private static var d: UserDefaults { .standard }
+
+    static var build: Int { d.integer(forKey: buildKey) }
+
+    static func pin(_ info: AppUpdateInfo) {
+        d.set(info.build, forKey: buildKey)
+        d.set(info.version, forKey: verKey)
+        d.set(info.url, forKey: urlKey)
+        d.set(info.notes, forKey: notesKey)
+    }
+
+    static func clear() {
+        d.removeObject(forKey: buildKey)
+        d.removeObject(forKey: verKey)
+        d.removeObject(forKey: urlKey)
+        d.removeObject(forKey: notesKey)
+    }
+
+    static func info() -> AppUpdateInfo {
+        AppUpdateInfo(version: d.string(forKey: verKey) ?? "",
+                      build: d.integer(forKey: buildKey),
+                      url: d.string(forKey: urlKey) ?? "",
+                      notes: d.string(forKey: notesKey) ?? "",
+                      minVersion: "",
+                      force: true)
     }
 }
