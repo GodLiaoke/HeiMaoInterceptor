@@ -22,6 +22,16 @@ enum StatsBridge {
     /// 巨魔 / 平台应用环境：主程序和扩展都能读写的公共缓存目录
     private static let sharedDir = "/var/mobile/Library/Caches/com.heimao.interceptor"
 
+    /// 主程序在启动隧道时把自己的 Documents 路径塞进 providerConfiguration，
+    /// 扩展照着写进来。这是最可靠的一条：App 自己的容器一定可写，
+    /// 平台应用环境下扩展也能写进去，不依赖 App Group 有没有真的建好。
+    private static var extraDir: String?
+
+    static func setExtraDir(_ path: String?) {
+        guard let p = path, !p.isEmpty else { return }
+        extraDir = p
+    }
+
     // MARK: - 写
 
     static func write(_ payload: [String: Any]) {
@@ -90,6 +100,11 @@ enum StatsBridge {
     private static func writeTargets() -> [URL] {
         var out: [URL] = []
         let fm = FileManager.default
+        /* 主程序指定的目录放第一位：这条最不会被沙盒挡住 */
+        if let dir = extraDir {
+            try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            out.append(URL(fileURLWithPath: dir, isDirectory: true).appendingPathComponent(fileName))
+        }
         if let g = fm.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
             let dir = g.appendingPathComponent("Library/Caches", isDirectory: true)
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -104,6 +119,10 @@ enum StatsBridge {
 
     private static func readTargets() -> [URL] {
         var out: [URL] = []
+        /* 主程序读自己的 Documents：扩展按这个路径写，两边必然对得上 */
+        if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            out.append(docs.appendingPathComponent(fileName))
+        }
         if let g = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: groupID) {
             out.append(g.appendingPathComponent("Library/Caches", isDirectory: true)
                 .appendingPathComponent(fileName))

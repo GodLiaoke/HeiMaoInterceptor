@@ -40,6 +40,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         pin  = (conf["pin"] as? String) ?? ""
         code = (conf["code"] as? String) ?? ""
 
+        /* 主程序把自己的 Documents 路径传过来了，统计就按这个路径写。
+           这是跨进程最稳的一条通道：不依赖 App Group 容器有没有被系统建出来。 */
+        StatsBridge.setExtraDir(conf["statsDir"] as? String)
+
         guard !pin.isEmpty else {
             phase = "failed:no_pin"
             StatsBridge.write(statsPayload())

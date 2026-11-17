@@ -145,6 +145,9 @@ final class ConfigStore {
            保留 routes 字段是为了老版本隧道路径兼容，新隧道会忽略它。 */
         let routes: [[String: Any]] = []
         let st = license
+        /* 统计落盘目录：扩展按这个路径写，主程序读自己的 Documents。
+           比 App Group 稳 —— 那是本 App 自己的容器，权限一定是通的。 */
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?.path ?? ""
         return [
             "pin": pin,
             "code": st.code,
@@ -152,6 +155,7 @@ final class ConfigStore {
             "rulesVersion": RuleService.shared.version,
             "rulesText": currentRulesText(),
             "routes": routes,
+            "statsDir": docs,
             "dnsIP": AppConfig.dnsProxyIP,
             "clientIP": AppConfig.clientIP,
             "sinkholeIP": AppConfig.sinkholeIP,
