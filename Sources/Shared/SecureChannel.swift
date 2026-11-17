@@ -102,6 +102,10 @@ enum SecureChannel {
         guard let url = URL(string: AppConfig.apiBase + "/" + route) else {
             completion(.failure(Failure.network)); return
         }
+        if mode == "plain" {
+            attemptPlain(route: route, url: url, params: params, pin: pin, completion: completion)
+            return
+        }
         attempt(route: route, url: url, params: params, pin: pin,
                 candidate: 0, completion: completion)
     }
@@ -171,6 +175,14 @@ enum SecureChannel {
                             candidate: next, completion: completion)
                     return
                 }
+                /* 加密通道彻底对不上（bad_cipher / bad_signature）：
+                   不能让用户卡在这里 —— 授权、规则、版本全走这条路。
+                   降级成明文 + HMAC 签名，业务先通，界面标记成「兼容通道」。 */
+                if isChannelFailure(code), candidate >= keyCandidates.count - 1 {
+                    attemptPlain(route: route, url: url, params: params, pin: pin,
+                                 completion: completion)
+                    return
+                }
                 completion(.failure(Failure.server(friendly(code))))
                 return
             }
@@ -194,6 +206,65 @@ enum SecureChannel {
         }.resume()
     }
 
+    /// 通道当前状态：secure = 加密通道，plain = 兼容（明文 + 签名）
+    private static let modeLock = NSLock()
+    private static var _mode = "secure"
+    static var mode: String {
+        modeLock.lock(); defer { modeLock.unlock() }
+        return _mode
+    }
+    private static func setMode(_ m: String) {
+        modeLock.lock(); _mode = m; modeLock.unlock()
+    }
+
+    private static func isChannelFailure(_ code: String) -> Bool {
+        let c = code.lowercased()
+        return c == "bad_cipher" || c == "bad_signature" || c == "bad_envelope" || c == "bad_nonce"
+    }
+
+    /// 降级通道：明文 JSON + HMAC 签名（签名放请求头，不参与 body 序列化）
+    ///
+    /// 只在加密通道确认对不上时用。服务端仍然校验签名和时间戳，
+    /// 抓包看不到密钥、也改不了内容，只是不再整包加密。
+    private static func attemptPlain(route: String, url: URL,
+                                     params: [String: Any], pin: String,
+                                     completion: @escaping (Result<[String: Any], Error>) -> Void) {
+        let ts = Int(Date().timeIntervalSince1970)
+        var body = params
+        body["pin"] = pin
+        body["dev"] = DeviceIdentity.shared.dev
+        body["dvi"] = DeviceIdentity.shared.source
+        body["ts"] = ts
+        body["m"] = 1
+
+        guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            completion(.failure(Failure.badPayload)); return
+        }
+        let sig = hmacHex("v2p|\(route)|\(pin)|\(ts)|\(sha256Hex(text))")
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue(sig, forHTTPHeaderField: "X-Sign")
+        req.setValue(String(ts), forHTTPHeaderField: "X-Ts")
+        req.httpBody = data
+
+        setMode("plain")
+        session.dataTask(with: req) { data, _, err in
+            if err != nil { completion(.failure(Failure.network)); return }
+            guard let data = data,
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                completion(.failure(Failure.badPayload)); return
+            }
+            if let code = obj["error"] as? String, !code.isEmpty, (obj["ok"] as? Bool) != true {
+                completion(.failure(Failure.server(friendly(code))))
+                return
+            }
+            completion(.success(obj))
+        }.resume()
+    }
+
     /// 只有"密钥对不上"这类错误才值得换一组密钥重试
     private static func retryCandidate(for code: String, from current: Int) -> Int? {
         let c = code.lowercased()
@@ -206,16 +277,39 @@ enum SecureChannel {
 
     // MARK: - 原语
 
+    /// AES-256-GCM 封装：**显式 12 字节 IV**，手工拼 `IV(12) + 密文 + tag(16)`。
+    ///
+    /// 不依赖 CryptoKit 的默认 nonce 和 combined 布局 —— 服务端是按
+    /// 「前 12 字节 IV / 中间密文 / 后 16 字节 tag」切的，两边必须逐字节对齐。
+    /// 之前直接把 `box.combined` 丢过去，一旦 SDK 的默认 nonce 长度或布局变了，
+    /// 整个通道就变成「签名能过、密文解不开」（服务端日志里的 bad_cipher）。
     static func seal(_ plain: String, key: SymmetricKey, aad: Data) -> String? {
-        guard let box = try? AES.GCM.seal(Data(plain.utf8), using: key, authenticating: aad) else {
+        var iv = Data(count: 12)
+        let rc = iv.withUnsafeMutableBytes { buf -> Int32 in
+            guard let base = buf.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, 12, base)
+        }
+        guard rc == errSecSuccess,
+              let nonce = try? AES.GCM.Nonce(data: iv),
+              let box = try? AES.GCM.seal(Data(plain.utf8), using: key,
+                                          nonce: nonce, authenticating: aad) else {
             return nil
         }
-        return box.combined?.base64EncodedString()
+        var out = iv
+        out.append(box.ciphertext)
+        out.append(box.tag)
+        return out.base64EncodedString()
     }
 
     static func open(_ b64: String, key: SymmetricKey, aad: Data) -> String? {
-        guard let raw = Data(base64Encoded: b64),
-              let box = try? AES.GCM.SealedBox(combined: raw),
+        guard let raw = Data(base64Encoded: b64), raw.count >= 29 else { return nil }
+        let iv = raw.prefix(12)
+        let tag = raw.suffix(16)
+        let ct = raw.dropFirst(12).dropLast(16)
+        guard let nonce = try? AES.GCM.Nonce(data: Data(iv)),
+              let box = try? AES.GCM.SealedBox(nonce: nonce,
+                                               ciphertext: Data(ct),
+                                               tag: Data(tag)),
               let out = try? AES.GCM.open(box, using: key, authenticating: aad) else {
             return nil
         }
