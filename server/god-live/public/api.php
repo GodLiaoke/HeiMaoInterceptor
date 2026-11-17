@@ -13,6 +13,7 @@ require __DIR__ . '/../app/Services/CryptoService.php';
 require __DIR__ . '/../app/Services/SettingsService.php';
 require __DIR__ . '/../app/Services/AuthGate.php';
 require __DIR__ . '/../app/Services/SecureV3.php';
+require __DIR__ . '/../app/Services/RuleNormalizer.php';
 
 $path   = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $path   = str_replace('/api/', '', $path);
@@ -392,6 +393,21 @@ try {
                 Res::json(['ok' => true, 'current' => null, 'content' => '']);
             }
             Res::json(['ok' => true, 'current' => $pack, 'content' => RulesService::content((int) $pack['id'])]);
+        }
+
+        case 'admin/rules/import|POST': {
+            /* 导入 txt：把任意格式的规则统一成客户端认识的三段式，
+               只做格式转换，不落库；后台确认后再走 /admin/rules/save */
+            AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b = Req::all();
+            $raw = (string) ($b['content'] ?? '');
+            if (strlen($raw) > 4 * 1024 * 1024) {
+                Res::json(['ok' => false, 'error' => 'too_large',
+                           'message' => '文件超过 4MB，拆一下再导入'], 400);
+            }
+            $r = RuleNormalizer::normalise($raw);
+            Res::json($r, $r['ok'] ? 200 : 400);
         }
 
         case 'admin/rules/save|POST': {

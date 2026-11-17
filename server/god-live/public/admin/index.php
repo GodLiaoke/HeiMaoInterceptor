@@ -380,6 +380,14 @@ require __DIR__ . '/../../app/bootstrap.php';
         </div>
         <div class="hint" id="r_now">—</div>
         <form id="rulesForm">
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
+            <input type="file" id="r_file" accept=".txt,.conf,.list,.rules,.csv,text/plain" hidden>
+            <button type="button" class="btn btn-primary" id="r_pick">导入 txt（自动适配）</button>
+            <button type="button" class="btn" id="r_fix">把下面内容自动适配</button>
+            <span class="muted" id="r_import" style="font-size:12px">
+              支持 #IP/#DOMAIN/#PORT 分段、hosts、dnsmasq、AdGuard、纯 IP/CIDR、带端口
+            </span>
+          </div>
           <div style="display:grid;grid-template-columns:1fr 2fr;gap:0 16px">
             <label class="field">
               <span class="label">规则版本</span>
@@ -974,6 +982,63 @@ async function loadRules() {
     $('#r_now').textContent = '还没有下发任何规则，客户端会提示规则加载失败';
   }
 }
+
+/* ── 规则导入：任意格式 → 标准三段式 ── */
+function applyImported(r, name) {
+  $('#r_content').value = r.text || '';
+  const d = new Date();
+  const p2 = (x) => String(x).padStart(2, '0');
+  $('#r_version').value = `${d.getFullYear()}.${p2(d.getMonth() + 1)}.${p2(d.getDate())}`;
+  const parts = [];
+  parts.push(`${r.ips} IP`);
+  parts.push(`${r.domains} 域名`);
+  if (r.direct) parts.push(`${r.direct} 放行`);
+  parts.push(`${r.ports} 端口`);
+  $('#r_note').value = (name ? `导入 ${name}：` : '导入：') + parts.join(' / ');
+  $('#r_import').textContent =
+    `已适配 ${r.ips} IP / ${r.domains} 域名 / ${r.ports} 端口` +
+    (r.skipped ? ` · 跳过 ${r.skipped} 行` : '') +
+    ` · 原文件 ${r.lines} 行 → ${(r.text || '').split('\n').length} 行，确认后点保存`;
+}
+
+async function importRulesText(text, name) {
+  const r = await api('admin/rules/import', { method: 'POST', body: { content: text } });
+  if (!r.ok) {
+    $('#r_import').textContent = r.message || ('导入失败：' + (r.error || 'unknown'));
+    toast(r.message || '导入失败', true);
+    return false;
+  }
+  applyImported(r, name);
+  toast(`已适配 ${r.ips} IP / ${r.domains} 域名 / ${r.ports} 端口，确认后点保存`);
+  return true;
+}
+
+$('#r_pick').addEventListener('click', () => $('#r_file').click());
+
+$('#r_file').addEventListener('change', async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const btn = $('#r_pick');
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '解析中…';
+  try {
+    const text = await file.text();
+    await importRulesText(text, file.name);
+  } catch (err) {
+    toast('读文件失败', true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+    e.target.value = '';
+  }
+});
+
+$('#r_fix').addEventListener('click', async () => {
+  const text = $('#r_content').value;
+  if (!text.trim()) { toast('先把规则内容粘进去', true); return; }
+  await importRulesText(text, '');
+});
 
 $('#rulesForm').addEventListener('submit', async (e) => {
   e.preventDefault();

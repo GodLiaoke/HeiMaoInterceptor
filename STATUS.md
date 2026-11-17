@@ -2,112 +2,101 @@
 
 ## 当前版本
 
-**v1.0 build 101**（2026-11-17 · 1.0 补充更新，不是新版本号）
+**v1.0 build 102**（2026-11-17 · 1.0 补充更新第二版）
 
-本次在 v1.0 基础上做补充升级，功能与接口向下兼容。
+版本号仍是 1.0，按需求只做补充，不发新版本号；build 102 用来区分。
 
 ---
 
-## 本次（1.0 补充）改了什么
+## build 102 改了什么
 
-### 1. 卡密作废 / 到期后，App 不再显示「已授权」
+### 1. 「安全校验未通过，请检查手机时间」——根因是路径签名不一致
 
-**原来的问题链**
+**现象**：卡密怎么输都激活不了，所有需要联网的动作全部失败，提示让检查手机时间。
 
-- 服务端 `authorized` 只看 `pins.authorized_until`（600 秒在线校验窗口）
-- 卡密在后台被作废之后，窗口还没过的那几分钟里，服务端仍然回 `authorized = true`
-- 客户端 `isUsable()` 只看本地缓存的时间，冷启动根本不向服务端求证
-- 结果：主界面显示「已授权」，但隧道启动时联网校验失败 → VPN 开不起来
+**根因**（跟时间无关）：
 
-**现在的做法**
+```
+客户端：SecureChannel.post("/announcement") → 签名串 "v3|/announcement|…"
+服务端：$path 经 trim → "announcement"        → 校验串 "v3|announcement|…"
+```
 
-| 层 | 改动 |
+两边拼出来的签名串不同，服务端一律返回 `bad_signature`，客户端把这类错误统一翻译成
+「请检查手机时间」，于是变成了一个查不出原因的假线索。
+
+**实测确认**（同一个请求只改路径形式）：
+
+| 请求路径 | 结果 |
 |---|---|
-| 服务端 | 新增 `AuthGate`：卡密存在 + 未作废 + 未到期 + 窗口有效，四关全过才算可用 |
-| 服务端 | 判定为 `card_revoked` / `card_expired` 时，顺手把该设备会话清零 |
-| 服务端 | 后台作废 / 删除卡密时，`AuthGate::sealByCard()` 立刻封掉绑定设备的会话 |
-| 服务端 | 新增 `POST /api/auth/check`：每次查库的强校验端点 |
-| 客户端 | `LicenseState.verdict` 记录服务端判定（ok / card_revoked / card_expired / card_not_found / no_card / window_expired） |
-| 客户端 | `isUsable()` 以 verdict 为准：判死立即失效，不给离线宽限 |
-| 客户端 | App 启动、回到前台、点开启 VPN 之前，都先调 `auth/check` |
-| 客户端 | 隧道扩展启动前再校验一次；运行中每 5 分钟复查，失效主动断开 |
-| 客户端 | 授权失效时界面同步变红横幅 + 锁形图标，不再出现「显示已授权但开不了」 |
+| `POST /api/session/renew`（签名 `session/renew`） | 200，正常返回加密信封 |
+| `POST /api/session/renew`（签名 `/session/renew`） | 400 `bad_signature` |
 
-### 2. 全链路 AES 加密 + 每次请求带签名
+**修复**
 
-抓包只能看到随机字节，改一个字节直接验签失败，重发同一条会被 nonce 拒掉。
+- 客户端：`SecureChannel.post` 先把路径 `trimmingCharacters("/")`，URL 与签名串都用规范化后的路径
+- 服务端：`SecureV3::unwrap` 验签失败时，再用带前导斜杠的形式校验一次，兼容已经发出去的老包
+- 错误码文案拆开：`stale_request` 才提示检查时间，签名类错误改说「请更新到最新版本」
 
-```
-请求：{ v:3, p:设备码, ts:秒, n:32位hex随机, e:AES-256-GCM密文, sig:HMAC }
-响应：{ v:3, n, e, sig }
-```
+### 2. 公告：主界面常驻，且永远不为空
 
-- 密钥：`HKDF-SHA256(主密钥, salt="heimao-v3-salt", info="heimao-v3-req"/"res")`
-- 签名：`HMAC-SHA256(主密钥, "v3|路径|设备码|ts|nonce|sha256(密文)")`
-- 防重放：`ts` ±300 秒 + 一次性 nonce（服务端 `nonces` 表去重）
-- 覆盖范围：公告、卡密兑换、续期、状态、强校验、版本检测、规则下发
-- 规则包本身仍是双层加密：传输层一层 + `HMR1` 包体一层
+- 主界面顶部固定展示公告卡，在开关球之上
+- 云端公告拉不到时用内置公告兜底（原来拉不到 → 整块消失 → 用户以为没有公告区）
+- 设置页的大公告卡收掉，只留一行「公告在主界面顶部」+ 刷新按钮，避免两处重复
 
-明文老接口保留（没有 `v=3` 就走原逻辑），老客户端不受影响。
+### 3. 界面重做
 
-### 3. 公告放显眼位置
+- 主开关区：状态点 + 一句话状态 + 明确的主按钮（开启/关闭防护），不用再猜哪里能点
+- 新增顶部三格概览（拦截 / 域名 / 规则），重要数字一进页面就能看到
+- 授权卡改成三格布局（卡密 / 到期 / 剩余），信息密度降下来
+- 统计区保留 2×2 磁贴，间距和层次统一
+- 设置页同步收敛
 
-- 主界面：顶栏正下方、开关球之上，琥珀色渐变横幅，默认露两行，点一下展开全文
-- 设置页：同样置顶一张公告卡
-- 公告随 App 启动 / 回前台 / 设置页刷新自动更新
+### 4. 规则引擎重写
 
-### 4. UI 与代码整理
+**解析**（`RuleSet.parse`）
 
-- 开关球支持「授权失效」态（锁形 + 琥珀色），不再让人误以为可以点开
-- 状态卡补上卡密掩码、剩余时间、规则规模，加「刷新状态 / 激活卡密」按钮
-- 顶栏加校验中的转圈提示
-- 设置页补「最后确认」时间，能看到上次和服务端对上的时刻
-- `RuleService` / `VersionService` / `LicenseClient` 统一走 `SecureChannel`，删掉三套重复的 URLSession
+- 保留 `#IP` / `#DOMAIN` / `#DIRECT` / `#PORT` 原生分段
+- 新增支持：`hosts`（`0.0.0.0 x.com` 拦截、`127.0.0.1 x.com` 放行）、
+  `dnsmasq`（`address=/x.com/0.0.0.0`）、AdGuard 订阅语法（`||x.com^`、`@@||x.com^`）、
+  带端口（`1.2.3.4:8080`、`x.com:443`）、CIDR、端口范围、一行多项、行尾注释、
+  通配符 `*.` `^` `|`
+- 坏行跳过并计数，不会因为一行格式错就整包失效
+
+**匹配**
+
+- 精确 IP 走 Set；CIDR 在解析阶段合并成互不相交的有序区间，查命中用二分
+- 域名逐级后缀匹配（`a.b.qq.com` 能命中 `qq.com`），放行名单优先
+- 端口规则真正参与判定：纯端口规则库按目标端口拦；有 IP 规则时端口不额外限制，
+  避免误伤同一 IP 的其它服务
+
+**稳定性**
+
+- 启动时规则为空 → 明确报「云端规则为空」，不再起一个什么都拦不住的隧道
+- 热更新报文解析为空 → 保留旧规则，返回 `reject`，不会把防护清空
 
 ---
 
 ## 服务端
 
-部署位置：`/www/wwwroot/ios.ouovo.cc`（PHP 8.0.26）
+线上：`/www/wwwroot/ios.ouovo.cc`（PHP 8.0.26）
 
-新增 / 改动文件：
+本次唯一改动：`app/Services/SecureV3.php` 兼容前导斜杠签名。
 
-```
-app/Services/AuthGate.php     新增：唯一授权判定
-app/Services/SecureV3.php     新增：v3 加密通道 + Req/Res 统一出入口
-app/Services/PinService.php   改：status() 走 AuthGate
-app/Services/SessionService.php 改：state() 走 AuthGate，payload 带 reason
-app/Services/CardService.php  改：作废/删除时封会话
-public/api.php                改：全端点接加密通道 + auth/check
-```
-
-备份：改动前已 `cp -a` 到 `~/bak-hm-<时间戳>/`。
+> 部署状态见交付说明；客户端 build 102 不依赖这一改动也能正常工作。
 
 ---
 
-## 机器人接口（bot.php）密钥位置
+## 构建
 
-文件：`/www/wwwroot/ios.ouovo.cc/storage/bot_config.php`（web 根目录之外，下载不到）
-
-```php
-return [
-    'api_key'     => 'fe317846cb8a2393a755ef34241bd7a2',   // 请求头 X-Api-Key
-    'secret'      => 'abb9b3b0...ba4beae1',                // HMAC 签名密钥
-    'time_window' => 300,
-];
-```
-
-- `api_key`：调用 `POST https://ios.ouovo.cc/bot.php` 时放在 `X-Api-Key`
-- `secret`：给请求签名用的 HMAC 密钥
-- 签名校验开关默认 **关闭**（`require_signature` 未设置 = false）；
-  要开启就在同一个数组里加一行 `'require_signature' => true`，
-  开启后每次请求要带 `X-Timestamp` 和 `X-Sign`
-- 改完立即生效，不用重启任何服务
+- 仓库：`GodLiaoke/HeiMaoInterceptor`
+- 分支：`main`
+- 流水线：`.github/workflows/build.yml`（4 个 macOS 机型并行）
+- 产物：未签名 ipa，`AppConfig.buildNumber = 102`
 
 ---
 
 ## 尚未完成 / 需要你处理
 
-- 出包仍需 GitHub Actions（本机没有 macOS 工具链）
-- 包是未签名的，用 ESign / 爱思自签，或自备 p12 + profile
-- 后台「版本」页里 1.0 那条的 IPA 下载地址需要填上托管链接，客户端更新弹窗才点得动
+- 包是未签名的，用 ESign / 爱思自签
+- 后台「版本」页里 1.0 那条记录需要把 build 改成 102、下载地址指向新包
+- 出包依赖 GitHub Actions（本机没有 macOS 工具链）
