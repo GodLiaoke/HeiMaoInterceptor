@@ -36,6 +36,8 @@ final class AppModel: ObservableObject {
     }
 
     @Published var stats: [String: Any] = [:]
+    /// 这次数字是从「隧道回包」还是「扩展落盘」来的，排查时能直接看出通道状态
+    @Published var statsSource: String = "—"
     @Published var ruleCounts: (ips: Int, domains: Int) = (0, 0)
     @Published var rulePorts: Int = 0
     @Published var ruleSource: String = "未加载"
@@ -570,29 +572,59 @@ final class AppModel: ObservableObject {
 
     func pollStats() {
         tunnel.fetchStats { [weak self] obj in
-            guard !obj.isEmpty else { return }
-            WorkQueue.main { self?.stats = obj }
+            guard let self = self else { return }
+            if !obj.isEmpty {
+                self.applyStats(obj, source: "隧道回包")
+                return
+            }
+            /* 回包丢了（扩展忙 / 会话刚建立 / 正在切网）：直接读扩展每 2 秒落盘的快照。
+               这条通道不依赖消息机制，是「拦截在生效但面板全是 0」的兜底。 */
+            let bridged = StatsBridge.read()
+            if !bridged.isEmpty {
+                self.applyStats(bridged, source: StatsBridge.isFresh(bridged) ? "扩展落盘" : "上次快照")
+            }
         }
+    }
+
+    private func applyStats(_ obj: [String: Any], source: String) {
+        WorkQueue.main {
+            self.stats = obj
+            self.statsSource = source
+        }
+    }
+
+    /// 统计字段容错读取
+    ///
+    /// JSON 往返后数字可能是 Int / NSNumber / Double，甚至被别的字段串成字符串。
+    /// 之前用 `as? Int` 一刀切，只要有一个字段被覆盖成字符串（比如 dns 被填成地址），
+    /// 那一格就永远显示 0。
+    private func num(_ key: String) -> Int {
+        if let v = stats[key] as? Int { return v }
+        if let v = stats[key] as? NSNumber { return v.intValue }
+        if let v = stats[key] as? Double { return Int(v) }
+        if let v = stats[key] as? String, let d = Double(v) { return Int(d) }
+        return 0
     }
 
     /// 拦截链路自检：隧道收包 / DNS 查询 / 旁路包 / 路由方案
     /// 收包一直是 0 = 系统流量没进隧道；DNS 是 0 = DNS 没接管；旁路在涨 = 路由补集没生效
     var diagText: String {
-        let tunnel = (stats["tunnel"] as? Int) ?? 0
-        let dns = (stats["dns"] as? Int) ?? 0
-        let stray = (stats["stray"] as? Int) ?? 0
+        let tunnelPackets = num("tunnel")
+        let dns = num("dns")
+        let stray = num("stray")
         let routes = (stats["routes"] as? String) ?? "—"
-        return "收包 \(tunnel) · DNS \(dns) · 旁路 \(stray) · \(routes)"
+        let detail = "收包 \(tunnelPackets) · DNS \(dns) · 旁路 \(stray) · \(routes)"
+        return detail + " · " + statsSource
     }
 
-    var blockedText: String { "\((stats["blocked"] as? Int) ?? 0)" }
-    var domainText: String { "\((stats["domains"] as? Int) ?? 0)" }
-    var tcpText: String { "\((stats["tcp"] as? Int) ?? 0)" }
-    var udpText: String { "\((stats["udp"] as? Int) ?? 0)" }
-    var connText: String { "\((stats["conn"] as? Int) ?? 0)" }
+    var blockedText: String { "\(num("blocked"))" }
+    var domainText: String { "\(num("domains"))" }
+    var tcpText: String { "\(num("tcp"))" }
+    var udpText: String { "\(num("udp"))" }
+    var connText: String { "\(num("conn"))" }
 
     var uptimeText: String {
-        let s = (stats["uptime"] as? Int) ?? 0
+        let s = num("uptime")
         let h = s / 3600, m = (s % 3600) / 60, sec = s % 60
         if h > 0 { return "\(h)时\(m)分" }
         if m > 0 { return "\(m)分\(sec)秒" }

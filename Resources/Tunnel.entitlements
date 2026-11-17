@@ -10,5 +10,9 @@
 	<array>
 		<string>com.heimao.interceptor</string>
 	</array>
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.heimao.interceptor</string>
+	</array>
 </dict>
 </plist>

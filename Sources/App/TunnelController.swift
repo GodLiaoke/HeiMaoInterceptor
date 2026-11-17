@@ -154,17 +154,35 @@ final class TunnelController: ObservableObject {
     }
 
     /// 拉统计
+    ///
+    /// `sendProviderMessage` 没有重传，扩展忙或系统切换网络时会一直不回调。
+    /// 这里加 1 秒硬超时，保证每次轮询一定有结果（拿不到就回空，上层读扩展落盘的快照）。
     func fetchStats(completion: @escaping ([String: Any]) -> Void) {
         guard let session = manager?.connection as? NETunnelProviderSession,
               session.status == .connected else {
             completion([:]); return
         }
+
+        let lock = NSLock()
+        var done = false
+        let finish: ([String: Any]) -> Void = { obj in
+            lock.lock()
+            if done { lock.unlock(); return }
+            done = true
+            lock.unlock()
+            completion(obj)
+        }
+
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+            finish([:])
+        }
+
         try? session.sendProviderMessage(Data("stats".utf8)) { data in
             guard let data = data,
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                completion([:]); return
+                finish([:]); return
             }
-            completion(obj)
+            finish(obj)
         }
     }
 }

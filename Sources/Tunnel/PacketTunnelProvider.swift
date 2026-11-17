@@ -21,6 +21,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var pin = ""
     private var code = ""
     private var verifyTimer: DispatchSourceTimer?
+    /// 统计落盘定时器：sendProviderMessage 丢回包时 App 靠这份兜底
+    private var statsTimer: DispatchSourceTimer?
+    private var stopReason = ""
     /// 周期校验连续失败次数：连着三次连不上服务端，就当链路断了，自己断开
     private var verifyFails = 0
 
@@ -203,6 +206,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         startedAt = Date()
         engine.start()
         startVerifyLoop()
+        startStatsPublisher()
 
         /* 保险：全接管方案如果被系统忽略了排除路由，用户会「上不了网」。
            启动 20 秒后看一眼统计，旁路包占了绝大多数就直接断开，
@@ -257,6 +261,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// 卸载规则 + 停隧道：内存里的规则先清掉再断，断完这一份就不存在了
     private func dropProtection(reason: String) {
+        stopReason = reason
+        /* 先把停下来那一刻的数字落盘，再拆引擎：
+           否则定时器下一次写盘会把所有计数刷成 0，用户看到的就是「归零」 */
+        StatsBridge.write(statsPayload())
+        statsTimer?.cancel()
+        statsTimer = nil
         ruleSet = RuleSet()
         engine?.stop()
         engine = nil
@@ -267,8 +277,49 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    /// 统计快照：provider message 和落盘通道共用同一份，两边数字必须一致
+    private func statsPayload() -> [String: Any] {
+        var payload = engine?.snapshot() ?? [:]
+        payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
+        payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
+        payload["routes"] = routeInfo
+        /* 注意：这里必须是 dnsServer，不能写 dns。
+           写成 dns 会把引擎回上来的 DNS 查询计数覆盖成地址字符串，
+           App 侧 as? Int 读到 nil，DNS 那一格永远是 0。 */
+        payload["dnsServer"] = dnsIP
+        payload["engine"] = engine != nil
+        payload["stopReason"] = stopReason
+        payload["ruleReport"] = [
+            "ips": ruleSet.report.exactIPs + ruleSet.report.cidrs,
+            "domains": ruleSet.report.domains,
+            "direct": ruleSet.report.direct,
+            "ports": ruleSet.report.ports,
+            "skipped": ruleSet.report.skipped,
+        ]
+        payload["bridgeAt"] = Int(Date().timeIntervalSince1970)
+        return payload
+    }
+
+    /// 每 2 秒把统计落一份盘，App 侧 sendProviderMessage 丢回包时读这份
+    private func startStatsPublisher() {
+        statsTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "hm.stats"))
+        t.schedule(deadline: .now() + 1, repeating: 2)
+        t.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            StatsBridge.write(self.statsPayload())
+        }
+        t.resume()
+        statsTimer = t
+    }
+
     override func stopTunnel(with reason: NEProviderStopReason,
                              completionHandler: @escaping () -> Void) {
+        statsTimer?.cancel()
+        statsTimer = nil
+        stopReason = "stopped"
+        /* 在引擎还活着时落最后一份：App 下一次轮询还能把停止前的数字读出来 */
+        StatsBridge.write(statsPayload())
         verifyTimer?.cancel()
         verifyTimer = nil
         engine?.stop()
@@ -287,18 +338,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         if cmd == "stats" {
-            var payload = engine?.snapshot() ?? [:]
-            payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
-            payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
-            payload["routes"] = routeInfo
-            payload["dns"] = dnsIP
-            payload["ruleReport"] = [
-                "ips": ruleSet.report.exactIPs + ruleSet.report.cidrs,
-                "domains": ruleSet.report.domains,
-                "direct": ruleSet.report.direct,
-                "ports": ruleSet.report.ports,
-                "skipped": ruleSet.report.skipped,
-            ]
+            let payload = statsPayload()
+            StatsBridge.write(payload)
             let data = try? JSONSerialization.data(withJSONObject: payload)
             completionHandler?(data)
             return

@@ -44,6 +44,10 @@ final class TunnelEngine {
     private struct CacheEntry {
         let response: Data
         let expireAt: TimeInterval
+        /// 这条缓存是「拦截答复」还是「上游放行答复」
+        /// 缓存命中同样要计拦截数，否则同一个被拦域名 30 秒内反复查询
+        /// 只有第一次计数，表现就是「拦得住但不涨」
+        let blocked: Bool
     }
 
     private let flow: NEPacketTunnelFlow
@@ -103,9 +107,31 @@ final class TunnelEngine {
     // MARK: - 主循环
 
     func start() {
-        statsLock.lock(); stats = Stats(); statsLock.unlock()
+        /* 隧道被系统重启（切网 / 内存回收 / 弱网重连）时把刚才的数字接上。
+           只接 30 秒内的：隔久了就是新的一次防护，不该继续累计。
+           不接的话用户会看到「刚拦了几百，一重连变 0」，也是「不计数」的常见观感。 */
+        var seed = Stats()
+        let prev = StatsBridge.read()
+        if let at = prev["bridgeAt"] as? Int,
+           abs(Int(Date().timeIntervalSince1970) - at) <= 30 {
+            seed.blockedPackets = TunnelEngine.value(prev["blocked"])
+            seed.blockedDomains = TunnelEngine.value(prev["domains"])
+            seed.blockedTCP     = TunnelEngine.value(prev["tcp"])
+            seed.blockedUDP     = TunnelEngine.value(prev["udp"])
+            seed.blockedConn    = TunnelEngine.value(prev["conn"])
+            seed.passedDNS      = TunnelEngine.value(prev["passed"])
+        }
+        statsLock.lock(); stats = seed; statsLock.unlock()
         runningLock.lock(); running = true; runningLock.unlock()
         readLoop()
+    }
+
+    /// 落盘快照读回来的数字容错（Int / NSNumber / String 都认）
+    private static func value(_ any: Any?) -> Int {
+        if let v = any as? Int { return v }
+        if let v = any as? NSNumber { return v.intValue }
+        if let v = any as? String, let d = Double(v) { return Int(d) }
+        return 0
     }
 
     func stop() {
@@ -249,7 +275,16 @@ final class TunnelEngine {
             out[0] = UInt8((id >> 8) & 0xFF)
             out[1] = UInt8(id & 0xFF)
         }
-        statsLock.lock(); stats.cacheHits += 1; statsLock.unlock()
+        /* 缓存命中也要计数：命中拦截答复 = 又拦了一次。
+           以前这里只加 cacheHits，所以同一个域名被反复请求时，
+           拦截一直在生效（客户端拿到黑洞地址），数字却纹丝不动。 */
+        statsLock.lock()
+        stats.cacheHits += 1
+        if entry.blocked {
+            stats.blockedPackets += 1
+            stats.blockedDomains += 1
+        }
+        statsLock.unlock()
         return out
     }
 
@@ -261,7 +296,9 @@ final class TunnelEngine {
         if dnsCache[key] == nil {
             dnsCacheKeys.append(key)
         }
-        dnsCache[key] = CacheEntry(response: response, expireAt: Date().timeIntervalSince1970 + ttl)
+        dnsCache[key] = CacheEntry(response: response,
+                                   expireAt: Date().timeIntervalSince1970 + ttl,
+                                   blocked: blocked)
         if dnsCacheKeys.count > dnsCacheLimit {
             let drop = dnsCacheKeys.prefix(256)
             for k in drop { dnsCache.removeValue(forKey: k) }
