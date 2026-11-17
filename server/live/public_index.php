@@ -44,9 +44,10 @@ foreach (glob($dir . '/*.ipa') ?: [] as $path) {
 krsort($packs, SORT_NUMERIC);
 $latest = $packs ? reset($packs) : null;
 
-$troll = $latest ? ($latest['files']['trollstore'] ?? $latest['files']['signed'] ?? null) : null;
-$self  = $latest ? ($latest['files']['unsigned'] ?? $latest['files']['signed'] ?? null) : null;
-$samePack = $latest && $troll && $self && $troll['name'] === $self['name'];
+/* 主下载：一份已签名包，巨魔直装与自签重签共用；未签名原始包收进「备用 IPA」折叠项 */
+$main = $latest ? ($latest['files']['signed'] ?? $latest['files']['trollstore'] ?? $latest['files']['unsigned'] ?? null) : null;
+$alt  = $latest ? ($latest['files']['unsigned'] ?? null) : null;
+$hasAlt = $main && $alt && $alt['name'] !== $main['name'];
 
 $versionText = $latest ? $latest['version'] : (string) ($vrow['version'] ?? '');
 $buildText   = $latest ? (string) (int) $latest['build'] : (string) ($vrow['build'] ?? '');
@@ -136,6 +137,24 @@ body{
 .btn-secondary:hover{background:#f2f4f7}
 .btn[aria-disabled="true"]{background:#eef0f3;color:var(--text-3);pointer-events:none}
 
+/* ---------- 折叠行（备用 IPA） ---------- */
+.row-details{display:block;border-top:1px solid var(--line)}
+.row-toggle{
+  display:flex;align-items:center;justify-content:space-between;gap:var(--s4);
+  padding:var(--s4);min-height:64px;cursor:pointer;list-style:none;outline:none;
+}
+.row-toggle::-webkit-details-marker{display:none}
+.row-toggle .row-label,.row-toggle .row-desc{display:block}
+.chev{
+  width:18px;height:18px;flex:0 0 auto;color:var(--text-3);
+  display:grid;place-items:center;transition:transform .15s ease;
+}
+.chev svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.row-details[open] .chev{transform:rotate(90deg)}
+.row-details[open] .row-toggle{border-bottom:1px solid var(--line)}
+.row-sub{background:#fafbfc}
+.row-sub .row-label{font-size:14px;font-weight:500}
+
 /* ---------- 文本块 ---------- */
 .body-text{padding:var(--s4);font-size:14px;line-height:1.75;color:var(--text)}
 .body-text p{margin:0}
@@ -189,12 +208,12 @@ body{
             <svg viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M10.5 5.5h3"/><path d="M9 11.5h6"/><path d="M9 15h4"/></svg>
           </span>
           <div class="row-text">
-            <div class="row-label">巨魔直装</div>
-            <div class="row-desc">TrollStore 安装，已签名<?= $troll ? ' · ' . h(fmtSize($troll['size'])) : '' ?></div>
+            <div class="row-label">安装包</div>
+            <div class="row-desc">已签名 · 巨魔直装、自签重签共用<?= $main ? ' · ' . h(fmtSize($main['size'])) : '' ?></div>
           </div>
         </div>
-        <?php if ($troll): ?>
-          <a class="btn btn-primary" href="/dl/<?= h(rawurlencode($troll['name'])) ?>" download>
+        <?php if ($main): ?>
+          <a class="btn btn-primary" href="/dl/<?= h(rawurlencode($main['name'])) ?>" download>
             <svg viewBox="0 0 24 24"><path d="M12 4v10"/><path d="m8 10.5 4 4 4-4"/><path d="M5 19h14"/></svg>
             下载
           </a>
@@ -203,29 +222,38 @@ body{
         <?php endif; ?>
       </div>
 
-      <div class="row">
-        <div class="row-main">
-          <span class="row-icon">
-            <svg viewBox="0 0 24 24"><path d="M12 3v9"/><path d="m8.5 8.5 3.5 3.5 3.5-3.5"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
+      <?php if ($hasAlt): ?>
+      <details class="row-details">
+        <summary class="row-toggle">
+          <span class="row-main">
+            <span class="row-icon">
+              <svg viewBox="0 0 24 24"><path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13 3v6h6"/><path d="M12 12v5"/><path d="m9.8 14.8 2.2 2.2 2.2-2.2"/></svg>
+            </span>
+            <span class="row-text">
+              <span class="row-label">备用 IPA</span>
+              <span class="row-desc">未签名原始包 · 自签工具无法导入上面那版时使用</span>
+            </span>
           </span>
-          <div class="row-text">
-            <div class="row-label">自签安装</div>
-            <div class="row-desc">ESign、爱思或其它侧载工具重签<?= ($self && !$samePack) ? ' · ' . h(fmtSize($self['size'])) : '' ?></div>
+          <span class="chev">
+            <svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>
+          </span>
+        </summary>
+        <div class="row row-sub">
+          <div class="row-main">
+            <div class="row-text">
+              <div class="row-label">未签名包</div>
+              <div class="row-desc">ESign、爱思或其它侧载工具重签 · <?= h(fmtSize($alt['size'])) ?></div>
+            </div>
           </div>
-        </div>
-        <?php if ($self): ?>
-          <a class="btn btn-secondary" href="/dl/<?= h(rawurlencode($self['name'])) ?>" download>
+          <a class="btn btn-secondary" href="/dl/<?= h(rawurlencode($alt['name'])) ?>" download>
             <svg viewBox="0 0 24 24"><path d="M12 4v10"/><path d="m8 10.5 4 4 4-4"/><path d="M5 19h14"/></svg>
             下载
           </a>
-        <?php else: ?>
-          <span class="btn btn-secondary" aria-disabled="true">暂不可用</span>
-        <?php endif; ?>
-      </div>
+        </div>
+      </details>
+      <?php endif; ?>
     </div>
-    <?php if ($samePack): ?>
-      <p class="hint">两项为同一个安装包：主程序与隧道扩展都已签名，巨魔可直接安装，用自签工具重新签名同样可用。</p>
-    <?php endif; ?>
+    <p class="hint">主程序与隧道扩展都已签名：巨魔可直接安装，用自签工具重新签名同样可用。只有自签工具报错时，才需要展开「备用 IPA」。</p>
   </section>
 
   <!-- 安装说明 -->
@@ -233,8 +261,8 @@ body{
     <h2 class="group-title">安装说明</h2>
     <div class="rows">
       <ol class="steps">
-        <li><b>巨魔用户</b>：下载后打开 TrollStore，选择 Install。不要再用 TrollStore 内的签名功能重新签一次。</li>
-        <li><b>自签用户</b>：下载后导入 ESign 或爱思，使用自己的证书签名安装。</li>
+        <li><b>巨魔用户</b>：下载上面的安装包，打开 TrollStore 选择 Install。不要再用 TrollStore 内的签名功能重新签一次。</li>
+        <li><b>自签用户</b>：用同一个安装包导入 ESign 或爱思，使用自己的证书签名安装。</li>
         <li>安装前先卸载手机中的旧版本，避免两个版本同时存在。</li>
         <li>首次打开后输入卡密激活，再点主界面中间的圆形按钮开启防护。</li>
       </ol>
@@ -256,7 +284,7 @@ body{
       <?php if ($latest): ?>
       <div class="row">
         <div class="row-label">安装包大小</div>
-        <div class="row-value"><?= h(fmtSize((int) ($troll['size'] ?? $self['size'] ?? 0))) ?></div>
+        <div class="row-value"><?= h(fmtSize((int) ($main['size'] ?? 0))) ?></div>
       </div>
       <?php endif; ?>
       <?php if ($updatedAt > 0): ?>
@@ -272,7 +300,7 @@ body{
     </div>
   </section>
 
-仅供学习与公益使用。安装或使用中遇到问题，请带上设备码与截图联系管理员。</p>
+  <p class="foot">仅供学习与公益使用。安装或使用中遇到问题，请带上设备码与截图联系管理员。</p>
 </main>
 </body>
 </html>
