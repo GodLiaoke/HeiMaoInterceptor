@@ -17,5 +17,11 @@
 	<string>com.heimao.interceptor.tunnel</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>HEIMAO</string>
+	<!-- 与主程序共用钥匙串：扩展读得到同一份设备标识，设备码才不会和 App 不一致
+	     （缺这一项时扩展访问钥匙串会拿 -34018，重装/升级后设备码变化，卡密会失配） -->
+	<key>keychain-access-groups</key>
+	<array>
+		<string>com.heimao.interceptor</string>
+	</array>
 </dict>
 </plist>
