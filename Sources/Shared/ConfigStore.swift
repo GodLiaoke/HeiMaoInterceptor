@@ -141,10 +141,9 @@ final class ConfigStore {
     ///
     /// 这个方法会被 `start()` 在后台线程调用，内部只读内存，不做解密/解析。
     func tunnelConfiguration() -> [String: Any] {
-        let rules = currentRuleSet()
-        let routes: [[String: Any]] = rules.includedRoutes().map {
-            ["ip": $0.0 as Any, "prefix": $0.1 as Any]
-        }
+        /* 路由交给隧道自己算（默认路由 + 规则补集），这里只带规则文本。
+           保留 routes 字段是为了老版本隧道路径兼容，新隧道会忽略它。 */
+        let routes: [[String: Any]] = []
         let st = license
         return [
             "pin": pin,
