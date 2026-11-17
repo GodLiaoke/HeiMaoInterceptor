@@ -191,7 +191,7 @@ struct RuleSet {
 
         // IP / CIDR
         if section != "domain" {
-            if let cidr = parseCIDR(hostPart) {
+            if let cidr = RuleSet.parseCIDR(hostPart) {
                 cidrList.append(cidr)
                 return
             }
@@ -205,7 +205,7 @@ struct RuleSet {
         // 域名
         if hostPart.contains(".") || section == "domain" || section == "direct" {
             let d = RuleSet.normalise(hostPart)
-            guard isValidDomain(d) else { report.skipped += 1; return }
+            guard RuleSet.isValidDomain(d) else { report.skipped += 1; return }
             insertDomain(d, direct: isDirect || section == "direct")
             return
         }
@@ -215,7 +215,7 @@ struct RuleSet {
 
     private mutating func insertDomain(_ raw: String, direct: Bool) {
         let d = RuleSet.normalise(raw)
-        guard isValidDomain(d) else { report.skipped += 1; return }
+        guard RuleSet.isValidDomain(d) else { report.skipped += 1; return }
         if direct {
             directDomains.insert(d); report.direct += 1
         } else {
