@@ -201,13 +201,21 @@ jobs:
             codesign -dv "$APP/HeiMaoInterceptor" 2>&1 | tee -a "$SIGN_LOG" || true
           fi
 
+          # ldid -S 会重写文件、把权限重置成 644；iOS 加载扩展要求可执行位，这里补回来
+          chmod 755 "$APPEX/HeiMaoTunnel" "$APP/HeiMaoInterceptor"
+
           # 重新打包（已签名版）
           cd "$RUNNER_TEMP"
           rm -f HeiMaoInterceptor-TrollStore.ipa
           zip -qryX HeiMaoInterceptor-TrollStore.ipa Payload
           ls -lh HeiMaoInterceptor-TrollStore.ipa
 
-          # 签名前后都要保住执行位
+          # 执行位硬校验：丢一个就整包作废，别让 644 的扩展流出去
+          BAD=$(unzip -Z HeiMaoInterceptor-TrollStore.ipa | grep -E "HeiMaoInterceptor$|HeiMaoTunnel$" | grep -v "^-rwxr-xr-x" || true)
+          if [ -n "$BAD" ]; then
+            echo "PERM_FAIL: 可执行位丢失 -> $BAD"
+            exit 1
+          fi
           unzip -Z HeiMaoInterceptor-TrollStore.ipa | grep -E "HeiMaoInterceptor$|HeiMaoTunnel$"
           echo "SIGN_PHASE_OK"
 

@@ -294,13 +294,13 @@ body{
       </div>
       <?php endif; ?>
       <div class="row">
-        <div class="row-label">公益频道</div>
+        <div class="row-label">官方频道</div>
         <div class="row-value"><a class="row-link" href="https://t.me/HeiMaoClub" target="_blank" rel="noopener">@HeiMaoClub</a></div>
       </div>
     </div>
   </section>
 
-  <p class="foot">仅供学习与公益使用。安装或使用中遇到问题，请带上设备码与截图联系管理员。</p>
+  <p class="foot">仅供个人学习与使用。安装或使用中遇到问题，请带上设备码与截图联系管理员。</p>
 </main>
 </body>
 </html>
