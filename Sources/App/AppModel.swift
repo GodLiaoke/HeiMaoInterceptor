@@ -652,7 +652,7 @@ final class AppModel: ObservableObject {
         if let age = StatsBridge.age(stats) { line += " · 心跳 \(age)秒前" }
         /* 分段模式 = 路由没能全接管，系统 DNS 不会进隧道，域名规则等于没开。
            这一句直接摆出来，用户不用再猜「为什么域名一条都没拦」 */
-        if routes.hasPrefix("按规则段") { line += " · 分段模式(域名不建议)" }
+        if routes.hasPrefix("按规则段") { line += " · 分段模式·域名不拦" }
         return line + " · \(phase) · \(routes) · \(statsSource)"
     }
 
