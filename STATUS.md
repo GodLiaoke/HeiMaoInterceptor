@@ -28,6 +28,26 @@
   `感谢使用黑猫拦截，本系统当前已开启付费` / `当前下发规则：Pro版（v2026.11.17）` / `希望大家多多订阅我们的频道： @HeiMaoClub`
   收起态只显示两行 → 第三行看不到，这就是用户说的「字看不全」
 
+### 上线记录（2026-11-18 18:06 北京时间）
+
+- 最终包：`/dl/HeiMao_Pro_v1.0.12_build115_signed.ipa`（1,255,816 B，sha256 `44a20b83…4f86`）
+- 未签：`/dl/HeiMao_Pro_v1.0.12_build115_unsigned.ipa`（1,238,257 B，sha256 `b31cfbb1…f6d3`）
+- 构建 run 44281576876 / 3c82ec2（macos-15 先出包）
+- 首轮 44281077030 作废在权限位：ldid 签名后把 appex 重置成 644，iOS 会拒绝加载扩展。
+  已在 workflow Pre-sign 之后补 `chmod 755` + 打包后 `unzip -Z` 硬校验，再打包
+- 已核对：主程序与扩展均 1.0.12 / 115、MinimumOSVersion 15.0、双端 755、
+  entitlements 含 platform-application + networking.networkextension、签名段在
+- 二进制内「公益」出现 0 次、「全网最强」1 次、「官方频道」2 次
+- 版本表 `app_versions`：1.0.12 / 115，force_update 保持 1，min_version 1.0.0
+- 线上两包实测 200，sha256 与本地逐字节一致；下载页已自动指向 1.0.12
+- 备份：`/root/app.db.bak_115_1806`
+- 传输方式：GitHub release 临时资产（用后已删）→ 服务器 curl 拉取
+
+### 待验证（我这边没有 iOS 真机）
+
+- 公告在 iPhone 上的实际换行效果、长标题是否折行正常 —— 需装上后看一眼
+- 设置页底部、频道卡文案
+
 ## 历史版本
 
 **v1.0.11 build 114**（2026-11-18 · 服务端换新规则后不拦截的根因修复）
