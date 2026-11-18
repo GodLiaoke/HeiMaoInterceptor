@@ -329,7 +329,7 @@ struct MainView: View {
                         .foregroundColor(HK.cyan)
                 }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("公益频道")
+                    Text("官方频道")
                         .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                         .foregroundColor(HK.text)
                     Text(AppConfig.channelName)
@@ -354,7 +354,7 @@ struct MainView: View {
 
     private var footer: some View {
         VStack(spacing: 6) {
-            Text("\(AppConfig.appName) · 公益免费 · 不采集任何流量内容")
+            Text("\(AppConfig.appName) · 全网最强 · 不采集任何流量内容")
                 .font(.system(size: 10.5, weight: .regular, design: .rounded))
                 .foregroundColor(HK.textFaint)
             Text("v\(AppConfig.appVersion) · build \(AppConfig.buildNumber)")

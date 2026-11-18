@@ -340,7 +340,7 @@ struct NoticeBanner: View {
 
     private var shownText: String {
         if expanded { return content }
-        // 收起时只露一行半，够看出是什么事
+        // 收起时最多露 5 行，展开时全文；两种情况都不截断文字内容
         return content
     }
 
@@ -362,28 +362,34 @@ struct NoticeBanner: View {
                         .foregroundColor(.black.opacity(0.82))
                 }
 
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top, spacing: 6) {
                         Text(title.isEmpty ? "最新公告" : title)
                             .font(.system(size: 13.5, weight: .bold, design: .rounded))
                             .foregroundColor(HK.text)
-                            .lineLimit(1)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .layoutPriority(2)
                         Text("公告")
                             .font(.system(size: 9, weight: .heavy, design: .rounded))
                             .foregroundColor(.black.opacity(0.8))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(Capsule().fill(HK.amber))
+                            .fixedSize()
                         Spacer(minLength: 0)
                     }
 
                     Text(shownText)
                         .font(.system(size: 12.5, weight: .regular, design: .rounded))
                         .foregroundColor(HK.textDim)
-                        .lineSpacing(4)
+                        .lineSpacing(5)
                         .multilineTextAlignment(.leading)
-                        .lineLimit(expanded ? nil : 2)
+                        .lineLimit(expanded ? nil : 5)
                         .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .layoutPriority(1)
 
                     HStack(spacing: 6) {
                         if !updated.isEmpty {
@@ -400,6 +406,7 @@ struct NoticeBanner: View {
                             .foregroundColor(HK.amber)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(14)
             .background(

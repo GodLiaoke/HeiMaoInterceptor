@@ -21,7 +21,7 @@ struct SettingsView: View {
                     rulesCard
                     aboutCard
 
-                    Text("公益免费 · \(AppConfig.channelName)")
+                    Text("全网最强 · \(AppConfig.channelName)")
                         .font(.system(size: 10.5, weight: .regular, design: .rounded))
                         .foregroundColor(HK.textFaint)
                         .padding(.top, 6)
@@ -67,7 +67,8 @@ struct SettingsView: View {
                     Text(model.displayNotice.title)
                         .font(.system(size: 11, weight: .regular, design: .rounded))
                         .foregroundColor(HK.textFaint)
-                        .lineLimit(1)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
                 Button {
@@ -277,7 +278,7 @@ struct SettingsView: View {
                             HStack {
                                 Image(systemName: "paperplane.fill")
                                     .font(.system(size: 12, weight: .semibold))
-                                Text("加入公益频道 \(AppConfig.channelName)")
+                                Text("加入官方频道 \(AppConfig.channelName)")
                                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                                 Spacer()
                                 Image(systemName: "arrow.up.right")

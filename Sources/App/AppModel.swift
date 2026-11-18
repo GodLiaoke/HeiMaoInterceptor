@@ -13,7 +13,8 @@ final class AppModel: ObservableObject {
     @Published var license: LicenseState = ConfigStore.shared.license
     @Published var authorized: Bool = false
     @Published var announcement: LicenseClient.Announcement?
-    @Published var announcementOpen: Bool = false
+    /// 公告默认展开：用户第一眼要能看完公告全文，不能一进来就被折成两行
+    @Published var announcementOpen: Bool = true
     @Published var cloudNotice: String?
 
     /// 设置页里那些「刷新」动作的结果，统一显示在主界面顶部
@@ -26,7 +27,7 @@ final class AppModel: ObservableObject {
     /// 云端公告拉不到时的兜底：主界面必须永远有公告位，不能空白
     static let builtinNotice = LicenseClient.Announcement(
         title: "欢迎使用 \(AppConfig.appName)",
-        content: "1. 首次使用请到「设置 · 卡密授权」输入卡密激活；激活后主界面会显示到期时间和规则版本。\n2. 主界面那个大圆球就是总开关，点一下开启、再点一下关闭，没有第二个按钮。\n3. 开启后只接管规则命中范围内的连接，正常上网不受影响。\n4. 卡密到期或被作废时，防护会自动关闭，界面会明确提示原因。\n5. 有问题或需要续期，请到公益频道 \(AppConfig.channelName) 反馈。",
+        content: "1. 首次使用请到「设置 · 卡密授权」输入卡密激活；激活后主界面会显示到期时间和规则版本。\n2. 主界面那个大圆球就是总开关，点一下开启、再点一下关闭，没有第二个按钮。\n3. 开启后只接管规则命中范围内的连接，正常上网不受影响。\n4. 卡密到期或被作废时，防护会自动关闭，界面会明确提示原因。\n5. 有问题或需要续期，请到官方频道 \(AppConfig.channelName) 反馈。",
         updatedAt: "")
 
     /// 主界面公告位实际展示的内容（云端优先）

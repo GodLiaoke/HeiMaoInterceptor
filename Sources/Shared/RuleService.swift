@@ -68,7 +68,7 @@ final class RuleService {
         return "\(mm)-\(dd) \(hh):\(mi)"
     }
 
-    /// 「公益规则 · 广告补充」这样的名字串
+    /// 「官方规则 · 广告补充」这样的名字串
     var setsText: String {
         if setNames.isEmpty { return "未标注" }
         return setNames.joined(separator: " · ")
