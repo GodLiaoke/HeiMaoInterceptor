@@ -169,11 +169,56 @@ final class TunnelController: ObservableObject {
         return error
     }
 
-    /// 规则热更新：把新规则推给扩展
-    func pushRules(_ text: String) {
-        guard let session = manager?.connection as? NETunnelProviderSession else { return }
-        guard let data = "rules:\(text)".data(using: .utf8) else { return }
-        try? session.sendProviderMessage(data) { _ in }
+    /// 规则热更新：把新规则推给扩展（扩展收到后会按新规则重算路由）
+    ///
+    /// `completion` 回 false = 消息没送到（这个环境下消息通道本来就可能不通），
+    /// 上层据此改成「重启隧道」，让新规则随启动配置一起生效 —— 否则用户会
+    /// 反复看到「规则已更新，但新规则一点不拦」。
+    func pushRules(_ text: String, completion: @escaping (Bool) -> Void) {
+        guard let session = manager?.connection as? NETunnelProviderSession else {
+            completion(false); return
+        }
+        guard let data = "rules:\(text)".data(using: .utf8) else { completion(false); return }
+
+        let lock = NSLock()
+        var done = false
+        let finish: (Bool) -> Void = { ok in
+            lock.lock()
+            if done { lock.unlock(); return }
+            done = true
+            lock.unlock()
+            DispatchQueue.main.async { completion(ok) }
+        }
+
+        /* 2 秒硬超时：回调不来就当没送到 */
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2.0) {
+            finish(false)
+        }
+
+        do {
+            try session.sendProviderMessage(data) { resp in
+                let text = resp.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                finish(text.hasPrefix("ok"))
+            }
+        } catch {
+            finish(false)
+        }
+    }
+
+    /// 热更新送不进扩展时的兜底：重启一次隧道
+    ///
+    /// 新规则随启动配置重新下发，路由按新规则重算（代价是短暂断流 1~2 秒）。
+    func restart() {
+        guard isConnected else { return }
+        manager?.connection.stopVPNTunnel()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
+            guard let self = self else { return }
+            self.start { result in
+                if case .failure(let err) = result {
+                    self.lastError = err.localizedDescription
+                }
+            }
+        }
     }
 
     /// 拉统计

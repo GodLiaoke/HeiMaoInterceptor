@@ -170,8 +170,12 @@ final class AppModel: ObservableObject {
             switch result {
             case .success(let text):
                 self.refreshRules()
-                if self.tunnel.isConnected {
-                    self.tunnel.pushRules(text)
+                /* 隧道已经在跑、又是手动同步：把新规则推进扩展（扩展会顺带重算路由）。
+                   送不进去就重启一次隧道，让新规则随启动配置生效。 */
+                if force, self.tunnel.isConnected {
+                    self.tunnel.pushRules(text) { ok in
+                        if !ok { self.tunnel.restart() }
+                    }
                 }
                 if force {
                     let c = self.ruleCounts
@@ -188,6 +192,28 @@ final class AppModel: ObservableObject {
                 }
                 completion?(false)
             }
+        }
+    }
+
+    /// 规则是不是过期了：每 15 分钟问一次服务端的规则版本，变了才下载
+    ///
+    /// 为什么需要：App 常驻后台时内存里那份规则会一直是旧的 —— 后台换了规则，
+    /// 客户端毫无感觉，用户看到的就是「服务端规则更新了，可一点没生效」。
+    /// 只在隧道跑着、授权有效时做，且走版本号比对，不会反复下载和重建路由。
+    private var lastRuleCheck = Date.distantPast
+
+    private func checkRuleFreshness() {
+        guard authorized, tunnel.isConnected else { return }
+        guard Date().timeIntervalSince(lastRuleCheck) > 900 else { return }
+        lastRuleCheck = Date()
+        let pin = ConfigStore.shared.pin
+        let code = ConfigStore.shared.license.code
+        guard !code.isEmpty else { return }
+
+        RuleService.shared.remoteVersion(pin: pin, code: code) { [weak self] remote in
+            guard let self = self, let remote = remote, !remote.isEmpty else { return }
+            guard remote != RuleService.shared.version else { return }
+            self.loadRules(force: true, requireTunnel: false)
         }
     }
 
@@ -355,6 +381,7 @@ final class AppModel: ObservableObject {
                             return
                         }
                         self.renewFailures = 0
+                        if silent { self.checkRuleFreshness() }
                         if ok && self.tunnel.isConnected && !RuleService.shared.isLoaded {
                             self.loadRules(force: false, requireTunnel: false)
                         }
@@ -623,6 +650,9 @@ final class AppModel: ObservableObject {
         var line = "收包 \(tunnelPackets) · DNS \(dns) · 拦截 \(blocked)"
         if stray > 0 { line += " · 旁路 \(stray)" }
         if let age = StatsBridge.age(stats) { line += " · 心跳 \(age)秒前" }
+        /* 分段模式 = 路由没能全接管，系统 DNS 不会进隧道，域名规则等于没开。
+           这一句直接摆出来，用户不用再猜「为什么域名一条都没拦」 */
+        if routes.hasPrefix("按规则段") { line += " · 分段模式(域名不建议)" }
         return line + " · \(phase) · \(routes) · \(statsSource)"
     }
 

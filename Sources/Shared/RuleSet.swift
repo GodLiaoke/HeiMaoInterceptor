@@ -438,7 +438,7 @@ struct RuleSet {
     /// - `forceInside`：必须留在隧道里的地址（DNS 代理、黑洞地址）。
     ///   它们在补集里被挖掉，否则系统会把 DNS 查询送回物理网络，整条链就断了。
     /// - `maxRoutes`：补集 CIDR 太多时退回保守方案，避免网络设置装不下起不来。
-    func routePlan(forceInside: [UInt32] = [], maxRoutes: Int = 2600,
+    func routePlan(forceInside: [UInt32] = [], maxRoutes: Int = 9000,
                    coarsenTo bits: Int = 32) -> RoutePlan {
         let blocked = blockedRanges(coarsenTo: bits)
 

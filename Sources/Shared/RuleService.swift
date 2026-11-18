@@ -145,6 +145,30 @@ final class RuleService {
         }
     }
 
+    /// 只问服务端「当前规则版本号」，不下载整包
+    ///
+    /// 用途：App 常驻后台好几天时，内存里那份规则会一直是旧的 ——
+    /// 后台换了规则，客户端一点感觉都没有，表现就是「规则更新了但没生效」。
+    /// 这里每十几分钟比一次版本号，变了才真去下载（省流量、也不会反复重建路由）。
+    func remoteVersion(pin: String, code: String,
+                       completion: @escaping (String?) -> Void) {
+        let norm = CryptoBox.normaliseCode(code)
+        guard !pin.isEmpty, !norm.isEmpty else { completion(nil); return }
+
+        SecureChannel.post(Obfs.s(26),
+                           params: ["code": norm, "b": AppConfig.buildNumber],
+                           pin: pin) { result in
+            switch result {
+            case .success(let obj):
+                let ok = (obj["ok"] as? Bool) == true
+                let v = ok ? (obj["version"] as? String) : nil
+                DispatchQueue.main.async { completion(v) }
+            case .failure:
+                DispatchQueue.main.async { completion(nil) }
+            }
+        }
+    }
+
     /// 真正的两段下载 + 后台解密
     private func download(pin: String, code: String,
                           completion: @escaping (Result<String, Error>) -> Void) {

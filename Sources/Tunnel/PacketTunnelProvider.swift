@@ -17,6 +17,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var startedAt = Date()
     /// 本次隧道的路由方案描述（诊断用）
     private var routeInfo = ""
+    /// 规则热更新要按新规则重算路由，这里留一份启动时的配置和 MTU
+    private var lastConf: [String: Any] = [:]
+    private var lastMTU = AppConfig.mtu
 
     private var pin = ""
     private var code = ""
@@ -152,38 +155,56 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         sinkholeIP = (conf["sinkholeIP"] as? String) ?? AppConfig.sinkholeIP
         let mtu = (conf["mtu"] as? Int) ?? AppConfig.mtu
 
-        /* 路由：**默认路由指向隧道**，规则之外的地址全部排除回物理网络。
-           为什么必须这样：iOS 在 split tunnel（只接管几个网段）下，系统的 DNS
-           查询经常压根不进隧道，DNS 设置等于摆设 —— 表现就是「开了防护一点没拦住」。
-           把隧道设成默认出口后，DNS 设置一定生效，而真正进隧道的仍然只有规则 IP 段
-           （其余的都在 excludedRoutes 里，照常走 Wi-Fi / 蜂窝，不影响上网速度）。 */
+        lastConf = conf
+        lastMTU = mtu
+        applyRoutePlan(makeRoutePlans(parsed, conf: conf), mtu: mtu,
+                       completion: completionHandler)
+    }
+
+    /// 生成路由候选方案（从最精确到最能装）
+    ///
+    /// 前提：**默认路由必须指向隧道**。iOS 在 split tunnel（只接管几个网段）下，
+    /// 系统的 DNS 查询经常压根不进隧道，NEDNSSettings 等于摆设 —— 表现就是
+    /// 「规则下发了、域名一条都没拦」。所以下面每一档都必须是「全接管 + 补集例外」，
+    /// 只有全都装不下时才退到「只接管规则段」（那一档域名规则基本废，仅保证 IP 规则能用）。
+    ///
+    /// 精确补集的条数随规则里 IP 数量增长：规则从 108 条 IP 涨到 196 条，
+    /// 补集就从 1553 条涨到 2708 条 —— 以前上限写死 2600，一涨就整档被放弃，
+    /// 于是降级成 split，域名规则静默失效。现在：
+    ///   1. 上限放宽到能装下常见规模的精确补集
+    ///   2. 精确档装不下时逐级放大聚合粒度，而不是直接跳到 split
+    private func makeRoutePlans(_ parsed: RuleSet, conf: [String: Any]) -> [RuleSet.RoutePlan] {
         let dnsValue  = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F0001
         let sinkValue = RuleSet.ipToUInt(sinkholeIP) ?? 0x0A6F0009
-        var plan = parsed.routePlan(forceInside: [dnsValue, sinkValue])
+        let extra = (conf["routes"] as? [[String: Any]]) ?? []
 
-        /* 依次尝试：精确补集 → /24 聚合 → /16 聚合 → 只接管规则段。
-           前三种都保住「隧道是默认出口」，也就是 DNS 一定进隧道；
-           最后一种只在系统死活装不下时兜底，至少防护能用。 */
-        var exact = plan
-        if let raw = conf["routes"] as? [[String: Any]], plan.hijackAll {
-            for item in raw {
+        var plans: [RuleSet.RoutePlan] = []
+        var lastCount = Int.max
+
+        /* 32 = 精确补集；24 / 20 = 把规则段对齐放大到整块，补集随之变少
+           （代价：同一块里没列进规则的地址也会进隧道，引擎不转发，那部分连不上，
+           所以只在精确档装不下时才用，且粒度不放得比 /20 更粗）。 */
+        for bits in [32, 24, 20] {
+            var p = parsed.routePlan(forceInside: [dnsValue, sinkValue], coarsenTo: bits)
+            guard p.hijackAll else { continue }          // 这一档自己放弃了
+            for item in extra {
                 guard let ip = item["ip"] as? String else { continue }
-                exact.excluded.removeAll { $0.0 == ip }
+                p.excluded.removeAll { $0.0 == ip }
             }
+            if p.routeCount >= lastCount { continue }    // 和上一档一样/更差，没必要试
+            plans.append(p)
+            lastCount = p.routeCount
         }
-        var wide24 = parsed.routePlan(forceInside: [dnsValue, sinkValue], coarsenTo: 24)
-        wide24.hijackAll = plan.hijackAll
-        var wide16 = parsed.routePlan(forceInside: [dnsValue, sinkValue], coarsenTo: 16)
-        wide16.hijackAll = plan.hijackAll
 
+        /* 最后一档：只接管规则段。DNS 大概率不进隧道，域名规则会失效，
+           但至少 IP 规则还能拦、也不会让用户断网。 */
         var split = RuleSet.RoutePlan()
         split.degraded = true
         split.included = RuleSet.cidrs(from: parsed.blockedRanges())
         split.included.append((dnsIP, 32))
         split.included.append((sinkholeIP, 32))
-
-        applyRoutePlan([exact, wide24, wide16, split], mtu: mtu,
-                       completion: completionHandler)
+        plans.append(split)
+        return plans
     }
 
     /// 逐个尝试路由方案，第一个装得进去的生效
@@ -204,6 +225,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             self.applyRoutePlan(plans, mtu: mtu, index: index + 1, completion: completion)
+        }
+    }
+
+    /// 规则热更新后按新规则重算路由
+    ///
+    /// 只换 ruleSet 不换路由的后果：新增的规则 IP 段仍然躺在 excludedRoutes 里，
+    /// 那些流量照旧走物理网卡、压根不进隧道 —— 表现就是「规则更新了，新规则一条没生效」。
+    /// 这里重设一次网络设置（会短暂 reassert），把补集按新规则重算。
+    private func rebuildRoutes() {
+        guard phase == "running" else { return }
+        payloadLock.lock(); let snapshot = ruleSet; payloadLock.unlock()
+        guard !snapshot.isEmpty else { return }
+        applyRoutesOnly(makeRoutePlans(snapshot, conf: lastConf), mtu: lastMTU)
+    }
+
+    private func applyRoutesOnly(_ plans: [RuleSet.RoutePlan], mtu: Int, index: Int = 0) {
+        guard index < plans.count else { return }
+        let plan = plans[index]
+        setTunnelNetworkSettings(buildSettings(plan, mtu: mtu)) { [weak self] error in
+            guard let self = self else { return }
+            if error == nil {
+                self.routeInfo = plan.description
+                StatsBridge.write(self.statsPayload())
+                return
+            }
+            self.applyRoutesOnly(plans, mtu: mtu, index: index + 1)
         }
     }
 
@@ -423,7 +470,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                     }
                     self.payloadLock.lock(); self.ruleSet = newRules; self.payloadLock.unlock()
                     self.engine?.update(rules: newRules)
-                    completionHandler?(Data("ok".utf8))
+                    /* 规则变了，路由必须跟着重算：不然新增的规则 IP 段还在
+                       排除列表里，作业面上「规则更新了但新规则不拦」。 */
+                    self.rebuildRoutes()
+                    let info = "ok:\(self.routeInfo)"
+                    completionHandler?(Data(info.utf8))
                 }
             }
             return
