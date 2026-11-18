@@ -34,8 +34,6 @@ targets:
       - path: Sources/Shared
       - path: Resources/Assets.xcassets
         buildPhase: resources
-      - path: Resources/rules.txt
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.heimao.interceptor
@@ -56,8 +54,6 @@ targets:
     sources:
       - path: Sources/Tunnel
       - path: Sources/Shared
-      - path: Resources/rules.txt
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.heimao.interceptor.tunnel

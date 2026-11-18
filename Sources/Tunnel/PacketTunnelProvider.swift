@@ -112,19 +112,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        /* 兜底：扩展自己向云端取（同样需要有效卡密）。
-           云端取不到时还有包内自带的规则可用 —— 不能因为服务端抖一下就让防护开不起来。 */
+        // 兜底：扩展自己向云端取（同样需要有效卡密）
         RuleService.shared.load(pin: pin, code: code, force: false) { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .success(let text):
                 self.begin(rulesText: text, conf: conf, completionHandler: completionHandler)
             case .failure(let err):
-                if RuleSet.bundled() != nil {
-                    self.begin(rulesText: "", conf: conf, completionHandler: completionHandler)
-                } else {
-                    completionHandler(err)
-                }
+                completionHandler(err)
             }
         }
     }
@@ -134,12 +129,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                        completionHandler: @escaping (Error?) -> Void) {
         /* 几万条规则的解析放到后台队列，别堵着扩展的启动线程 */
         WorkQueue.async { [weak self] in
-            /* 包内自带的规则永远作为底座，云端规则并上去：
-               服务端换规则时不会把内置的 IP / 域名段冲掉，没网也能拦住一批。 */
-            var parsed = RuleSet.parse(text: rulesText)
-            if let builtin = RuleSet.bundled() {
-                parsed = parsed.isEmpty ? builtin : parsed.merging(builtin)
-            }
+            let parsed = RuleSet.parse(text: rulesText)
             WorkQueue.main {
                 guard let self = self else { return }
                 self.applyRules(parsed, conf: conf, completionHandler: completionHandler)
@@ -462,10 +452,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let text = String(cmd.dropFirst(6))
             WorkQueue.async { [weak self] in
                 guard let self = self else { return }
-                var newRules = RuleSet.parse(text: text)
-                if let builtin = RuleSet.bundled() {
-                    newRules = newRules.isEmpty ? builtin : newRules.merging(builtin)
-                }
+                let newRules = RuleSet.parse(text: text)
                 WorkQueue.main {
                     /* 热更新失败时保留旧规则，不要因为一次坏包把防护清空 */
                     guard !newRules.isEmpty else {

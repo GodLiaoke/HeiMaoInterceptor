@@ -418,24 +418,6 @@ struct RuleSet {
         return out
     }
 
-    // MARK: - 内置规则
-
-    /// 包里自带的规则（Resources/rules.txt）
-    static func bundled(named name: String = "rules") -> RuleSet? {
-        var urls: [URL] = []
-        if let u = Bundle.main.url(forResource: name, withExtension: "txt") { urls.append(u) }
-        for bundle in Bundle.allBundles {
-            if let u = bundle.url(forResource: name, withExtension: "txt") { urls.append(u) }
-        }
-        for url in urls {
-            if let text = try? String(contentsOf: url, encoding: .utf8) {
-                let set = RuleSet.parse(text: text)
-                if !set.isEmpty { return set }
-            }
-        }
-        return nil
-    }
-
     // MARK: - 判定
 
     private static func mask(for prefix: Int) -> UInt32 {

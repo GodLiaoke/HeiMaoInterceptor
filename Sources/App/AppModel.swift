@@ -129,12 +129,7 @@ final class AppModel: ObservableObject {
 
     func refreshRules() {
         let rs = RuleService.shared
-        /* 界面显示的是「内置规则 + 云端规则」合并后的实际条数，
-           否则云端还没拉下来时界面显示 0，看着像规则没生效。 */
-        var set = rs.currentSet
-        if let builtin = RuleSet.bundled() {
-            set = set.isEmpty ? builtin : set.merging(builtin)
-        }
+        let set = rs.currentSet
         ruleCounts = (set.summary.ips, set.domains.count)
         rulePorts = set.report.ports
         ruleSource = ConfigStore.shared.rulesSourceLabel
