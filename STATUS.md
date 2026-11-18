@@ -31,8 +31,9 @@
 
 ### 上线记录（2026-11-18 11:54 北京时间）
 
-- 包：`/dl/HeiMao_Pro_v1.0.11_build114_signed.ipa`（1,252,726 B，sha256 `421eb2bd…1552`）
-- 未签：`/dl/HeiMao_Pro_v1.0.11_build114_unsigned.ipa`（1,235,596 B，sha256 `aff0af70…a313`）
+- 最终包：`/dl/HeiMao_Pro_v1.0.11_build114_signed.ipa`（1,252,724 B，sha256 `a648c98e…e76e`）
+- 未签：`/dl/HeiMao_Pro_v1.0.11_build114_unsigned.ipa`（1,235,587 B，sha256 `c5928282…0d66`）
+- 首轮构建（bf24228）只作废在「说明书」这一步：降级文案改成「分段模式·域名不拦」后重出（6f568c4）
 - 两包实测 200、sha256 与本地逐字节一致；首页已自动指向 1.0.11
 - 版本表：1.0.11 / 114，force_update=1，min_version 1.0.0
 - 构建 run 44233326105 / bf24228（macos-26 先出包）
