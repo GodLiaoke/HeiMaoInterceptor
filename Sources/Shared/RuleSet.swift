@@ -1,23 +1,26 @@
 import Foundation
 
-/// 规则库：IP / 域名 / 端口 / 放行白名单
+/// 规则库：按 ACE 3.0 的数据契约定标（IP / 域名 / 端口 三段 + 状态机解析）
 ///
-/// 解析上尽量宽松，别人给的规则文件拿来就能用：
+/// 解析规则（与 ACE 的 Rules.parse 逐条对齐）：
+///   1. 段头：去掉行首 `#` / `//` / `;`，trim，转大写，
+///      以 `IP` 开头进 IP 段；以 `DOMAIN` / `域名` 开头进域名段；
+///      以 `PORT` / `端口` 开头进端口段；其余注释行不切段
+///   2. 第一个段头之前的所有行一律丢弃
+///   3. IP 行：`A.B.C.D` | `A.B.C.D/N` | `A.B.C.D:端口` | `A.B.C.D:起-止`，
+///      逗号后缀 `,DIRECT` / `,ALLOW` 表示放行，其余一律当拦截
+///   4. 域名行：去 `,DIRECT` → 转小写 → 去 http(s):// → 第一个 `/` 截断 → 去行首的点
+///   5. 端口行：只入集合，不参与判定（与原版一致）
 ///
-///   `#IP` / `#DOMAIN` / `#DIRECT` / `#PORT` 分段标记（原生格式）
-///   纯 IP、CIDR：`1.2.3.4`、`1.2.3.0/24`
-///   hosts：`0.0.0.0 example.com`（127.0.0.1 归到放行）
-///   dnsmasq：`address=/example.com/0.0.0.0`
-///   AdGuard／通用订阅：`||example.com^`、`@@||example.com^`、`|https://example.com`
-///   带端口：`1.2.3.4:8080`、`example.com:443`（拆成目标和端口）
-///   一行多项（空格 / 逗号分隔）、行尾注释、`!` 注释、通配符 `*.` `*` `^` `|`
+/// 兼容层：老格式（hosts / dnsmasq / AdGuard）照旧认得，避免历史规则包解析成空。
 ///
-/// 匹配上做了两件事，规则涨到几万条也不会拖慢转发：
-///   - IP 段在解析时就合并成互不相交的有序区间，查命中走二分
-///   - 精确 IP 走 Set，域名走逐级后缀查 Set
+/// 匹配上：
+///   - /32 且不限端口的走 Set 精确命中
+///   - 其余前缀 / 带端口规则线性扫（规则集只有几百条，够快）
+///   - 域名逐级后缀命中（写 a.com 等于 *.a.com）
 struct RuleSet {
 
-    // MARK: - 解析结果
+    // MARK: - 报告 / 规则模型
 
     struct ParseReport {
         var exactIPs = 0
@@ -26,329 +29,473 @@ struct RuleSet {
         var direct   = 0
         var ports    = 0
         var skipped  = 0
+        var routes   = 0
 
         var summaryText: String {
             "\(exactIPs + cidrs) IP · \(domains) 域名 · \(ports) 端口"
         }
     }
 
-    /// 合并后的地址区间（闭区间，按 start 升序且互不相交）
-    private struct Segment {
-        let start: UInt32
-        let end: UInt32
+    struct IPRule {
+        let base: UInt32
+        let prefix: Int
+        let portFrom: Int        // -1 = 不限端口
+        let portTo: Int
+        let direct: Bool
     }
 
-    private(set) var exactIPs: Set<UInt32> = []
-    private var segments: [Segment] = []
+    private enum Section: Equatable {
+        case none, ip, domain, port
+    }
+
+    // MARK: - 解析结果
+
+    private(set) var ipRules: [IPRule] = []
     private(set) var domains: Set<String> = []
     private(set) var directDomains: Set<String> = []
     private(set) var ports: Set<Int> = []
-    private(set) var portSpecs: [String] = []
+    private(set) var portRanges: [(from: Int, to: Int)] = []
     private(set) var report = ParseReport()
 
-    var isEmpty: Bool {
-        exactIPs.isEmpty && segments.isEmpty && domains.isEmpty
-    }
+    /// 派生索引
+    private var exact32: Set<UInt32> = []
+    private var prefixRules: [IPRule] = []
+    private var directRules: [IPRule] = []
 
-    /// 摘要，用于 UI 显示
+    /// 隧道路由（只收「非放行 + 不限端口」的规则，与原版 buildRoutes 一致）
+    private(set) var routes: [(String, Int)] = []
+
+    var isEmpty: Bool { ipRules.isEmpty && domains.isEmpty }
+
     var summary: (ips: Int, domains: Int) {
         (report.exactIPs + report.cidrs, domains.count)
     }
 
-    // MARK: - 解析
+    // MARK: - 解析入口
 
     static func parse(text: String) -> RuleSet {
         var rs = RuleSet()
-        var section = ""
-        var cidrList: [(UInt32, UInt32)] = []
+        let lines = text.components(separatedBy: .newlines)
 
-        text.enumerateLines { line, _ in
-            let raw = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if raw.isEmpty { return }
+        var hasHeader = false
+        for line in lines where sectionHeader(line) != nil {
+            hasHeader = true
+            break
+        }
 
-            // 分段标记（只有短行才当标记，避免把长注释误判成段头）
-            if raw.hasPrefix("#") {
-                let head = raw.uppercased()
-                if head.hasPrefix("#IP"), raw.count <= 8 { section = "ip"; return }
-                if head.hasPrefix("#DOMAIN"), raw.count <= 14 { section = "domain"; return }
-                if head.hasPrefix("#DIRECT"), raw.count <= 14 { section = "direct"; return }
-                if head.hasPrefix("#PORT"), raw.count <= 10 { section = "port"; return }
-                return
+        var section: Section = .none
+        for raw in lines {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.isEmpty { continue }
+
+            if let head = sectionHeader(raw) {
+                section = head
+                continue
             }
-            if raw.hasPrefix("!") || raw.hasPrefix(";") || raw.hasPrefix("//") { return }
+            if line.hasPrefix("#") || line.hasPrefix("//")
+                || line.hasPrefix(";") || line.hasPrefix("!") { continue }
 
-            let body = stripInlineComment(raw)
+            let body = stripInlineComment(line)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if body.isEmpty { return }
+            if body.isEmpty { continue }
 
-            let tokens = splitTokens(body)
+            /* 老规则包没有段头：按行首特征自动判类型，别整包丢掉 */
+            let effective = hasHeader ? section : sniff(body)
+            if effective == .none { continue }      // 第一个段头之前：丢弃
 
-            /* hosts 格式：0.0.0.0 x.com 是拦截，127.0.0.1 x.com 是放行 */
-            if tokens.count > 1, let head = RuleSet.ipToUInt(tokens[0]),
-               head == 0 || head == 0x7F000001 {
-                let isDirectHost = (head == 0x7F000001)
-                for token in tokens.dropFirst() {
-                    rs.insertDomain(token, direct: isDirectHost)
-                }
-                return
-            }
-
-            for token in tokens {
-                rs.absorb(token, section: section, cidrList: &cidrList)
+            switch effective {
+            case .ip:     rs.addIpLine(body)
+            case .domain: rs.addDomainLine(body)
+            case .port:   rs.addPortLine(body)
+            case .none:   break
             }
         }
 
-        rs.segments = merge(cidrList)
-        rs.report.cidrs = cidrList.count
+        rs.rebuild()
         return rs
     }
 
-    /// 去掉行尾注释（`#` 前必须有空白，避免切坏 `#IP` 之外的正常内容）
+    /// 段头识别：先剥 # / // / ;，再按 startsWith 判（`#IPLIST` 也算段头）
+    private static func sectionHeader(_ raw: String) -> Section? {
+        var t = raw.trimmingCharacters(in: .whitespaces)
+        guard let first = t.first else { return nil }
+        if t.hasPrefix("//") {
+            t.removeFirst(2)
+        } else if first == "#" || first == ";" {
+            t.removeFirst()
+        } else {
+            return nil
+        }
+        t = t.trimmingCharacters(in: .whitespaces)
+        let u = t.uppercased()
+        if u.hasPrefix("IP") { return .ip }
+        if u.hasPrefix("DOMAIN") || u.hasPrefix("域名") { return .domain }
+        if u.hasPrefix("PORT") || u.hasPrefix("端口") { return .port }
+        return nil
+    }
+
+    /// 无段头时的类型嗅探
+    private static func sniff(_ line: String) -> Section {
+        let head = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).first.map(String.init) ?? line
+        if head.contains("/") && head.contains(".") && (ipToUInt(String(head.split(separator: "/")[0])) != nil) {
+            return .ip
+        }
+        if ipToUInt(baseOf(head)) != nil { return .ip }
+        if head.allSatisfy({ $0.isNumber || $0 == "-" }) { return .port }
+        return .domain
+    }
+
+    /// 去掉端口 / 前缀后的地址部分
+    private static func baseOf(_ token: String) -> String {
+        var t = token
+        if let slash = t.firstIndex(of: "/") { t = String(t[t.startIndex..<slash]) }
+        if let colon = t.lastIndex(of: ":"), !t.contains("::") {
+            t = String(t[t.startIndex..<colon])
+        }
+        return t
+    }
+
+    /// 行尾注释：`#` 前必须有空白，避免切坏 `#IP` 之外的正常内容
     private static func stripInlineComment(_ line: String) -> String {
         guard let range = line.range(of: " #") else { return line }
         return String(line[line.startIndex..<range.lowerBound])
     }
 
-    /// 一行多项：空格 / Tab / 逗号
-    private static func splitTokens(_ line: String) -> [String] {
-        line.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "," })
-            .map(String.init)
-            .filter { !$0.isEmpty }
-    }
+    // MARK: - IP 行
 
-    private mutating func absorb(_ token: String,
-                                 section: String,
-                                 cidrList: inout [(UInt32, UInt32)]) {
-        let t0 = token.trimmingCharacters(in: CharacterSet(charactersIn: " "))
+    private mutating func addIpLine(_ line: String) {
+        let tokens = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
 
-        // 通配 / 注解符号先剥掉
-        var t = t0
-        var isDirect = false
-        if t.hasPrefix("@@") { isDirect = true; t.removeFirst(2) }
-        if t.hasPrefix("||") { t.removeFirst(2) }
-        while t.hasPrefix("|") || t.hasPrefix("*") || t.hasPrefix(".") {
-            t.removeFirst()
-        }
-        while t.hasSuffix("^") || t.hasSuffix("|") || t.hasSuffix("*") || t.hasSuffix(".") {
-            t.removeLast()
-        }
-
-        // 正则类规则直接跳过
-        if t.hasPrefix("/") || t.hasPrefix("[") { report.skipped += 1; return }
-
-        // 单独出现的 0.0.0.0 / 127.0.0.1 只是 hosts 的前导地址，不是规则
-        if let ip = RuleSet.ipToUInt(t0), ip == 0 || ip == 0x7F000001 {
+        /* hosts：`0.0.0.0 a.com` 拦截，`127.0.0.1 a.com` 放行 */
+        if tokens.count > 1, let head = RuleSet.ipToUInt(tokens[0]),
+           head == 0 || head == 0x7F00_0001 {
+            for token in tokens.dropFirst() {
+                insertDomain(token, direct: head == 0x7F00_0001)
+            }
             return
         }
 
-        // dnsmasq: address=/example.com/0.0.0.0
-        if t.lowercased().hasPrefix("address=") {
-            let parts = t.split(separator: "/")
-            for part in parts {
+        guard let rule = RuleSet.parseIpRule(line) else {
+            /* 段里混进来的域名 / AdGuard 写法：按兼容层再试一次 */
+            if !compatAbsorb(line, allowDirect: true) { report.skipped += 1 }
+            return
+        }
+        ipRules.append(rule)
+    }
+
+    static func parseIpRule(_ raw: String) -> IPRule? {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+
+        var direct = false
+        if let comma = text.firstIndex(of: ",") {
+            let suffix = String(text[text.index(after: comma)...])
+                .trimmingCharacters(in: .whitespaces).uppercased()
+            text = String(text[text.startIndex..<comma])
+                .trimmingCharacters(in: .whitespaces)
+            if suffix == "DIRECT" || suffix == "ALLOW" { direct = true }
+        }
+
+        var portFrom = -1
+        var portTo = -1
+        if let colon = text.lastIndex(of: ":"), !text.contains("::") {
+            let portText = String(text[text.index(after: colon)])
+                .trimmingCharacters(in: .whitespaces)
+            text = String(text[text.startIndex..<colon])
+            if !portText.isEmpty, portText.allSatisfy({ $0.isNumber || $0 == "-" }) {
+                if portText.contains("-") {
+                    let parts = portText.split(separator: "-")
+                    if parts.count == 2, let a = Int(parts[0]), let b = Int(parts[1]),
+                       a > 0, b >= a, b <= 65535 {
+                        portFrom = a
+                        portTo = b
+                    }
+                } else if let p = Int(portText), p > 0, p <= 65535 {
+                    portFrom = p
+                    portTo = p
+                }
+            }
+            /* 端口写坏了（`1.2.3.4:` / `:abc`）当不限端口处理，等价于原版的「全端口」 */
+        }
+
+        var prefix = 32
+        if let slash = text.firstIndex(of: "/") {
+            let bits = String(text[text.index(after: slash)])
+            text = String(text[text.startIndex..<slash])
+            guard let b = Int(bits), b >= 0, b <= 32 else { return nil }
+            prefix = b
+        }
+
+        guard let base = ipToUInt(text) else { return nil }
+        return IPRule(base: base, prefix: prefix,
+                      portFrom: portFrom, portTo: portTo, direct: direct)
+    }
+
+    // MARK: - 域名行
+
+    private mutating func addDomainLine(_ line: String) {
+        let tokens = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+
+        if tokens.count > 1, let head = RuleSet.ipToUInt(tokens[0]),
+           head == 0 || head == 0x7F00_0001 {
+            for token in tokens.dropFirst() {
+                insertDomain(token, direct: head == 0x7F00_0001)
+            }
+            return
+        }
+
+        /* dnsmasq：address=/example.com/0.0.0.0 */
+        if line.lowercased().hasPrefix("address=") {
+            var touched = false
+            for part in line.split(separator: "/") {
                 let s = String(part)
                 if s.contains("."), RuleSet.ipToUInt(s) == nil {
                     insertDomain(s, direct: false)
+                    touched = true
                 }
             }
+            if touched { return }
+        }
+
+        guard let parsed = RuleSet.parseDomain(line) else {
+            report.skipped += 1
             return
         }
+        insertDomain(parsed.0, direct: parsed.1)
+    }
 
-        // 带端口
-        var hostPart = t
-        var port: Int?
-        if let colon = t.lastIndex(of: ":"),
-           !t.contains("::"),                       // 排除 IPv6
-           let p = Int(t[t.index(after: colon)...]), p > 0, p <= 65535 {
-            hostPart = String(t[t.startIndex..<colon])
-            port = p
-        }
-        if let p = port, !hostPart.isEmpty, hostPart.contains(".") {
-            ports.insert(p)
-            portSpecs.append("\(hostPart):\(p)")
-            report.ports += 1
+    static func parseDomain(_ raw: String) -> (String, Bool)? {
+        var t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+
+        var direct = false
+        if let comma = t.firstIndex(of: ",") {
+            let suffix = String(t[t.index(after: comma)...])
+                .trimmingCharacters(in: .whitespaces).uppercased()
+            t = String(t[t.startIndex..<comma])
+            if suffix == "DIRECT" || suffix == "ALLOW" { direct = true }
         }
 
-        // 端口段
-        if section == "port" || (port == nil && isPortOnly(t)) {
-            if let p = Int(t), p > 0, p <= 65535 {
-                ports.insert(p)
-                portSpecs.append(t)
-                report.ports += 1
-                return
-            }
-            // 端口范围 1000-2000
+        /* 老格式的放行标记：@@||x^ */
+        if t.hasPrefix("@@") { direct = true; t.removeFirst(2) }
+        while t.hasPrefix("|") { t.removeFirst() }
+        while t.hasPrefix("*.") { t.removeFirst(2) }
+
+        t = t.lowercased()
+        if t.hasPrefix("https://") { t.removeFirst(8) }
+        else if t.hasPrefix("http://") { t.removeFirst(7) }
+        while t.hasPrefix(".") { t.removeFirst() }
+        while t.hasSuffix("^") || t.hasSuffix("|") || t.hasSuffix("*") { t.removeLast() }
+
+        if let slash = t.firstIndex(of: "/") { t = String(t[t.startIndex..<slash]) }
+        while t.hasPrefix(".") { t.removeFirst() }
+        while t.hasSuffix(".") { t.removeLast() }
+
+        guard isValidDomain(t) else { return nil }
+        return (t, direct)
+    }
+
+    // MARK: - 端口行
+
+    private mutating func addPortLine(_ line: String) {
+        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.contains("-") {
             let parts = t.split(separator: "-")
-            if parts.count == 2, let a = Int(parts[0]), let b = Int(parts[1]), a <= b, b <= 65535 {
-                var v = a
-                while v <= b && ports.count < 4096 {
-                    ports.insert(v); v += 1
+            if parts.count == 2, let a = Int(parts[0]), let b = Int(parts[1]),
+               a > 0, b >= a, b <= 65535 {
+                portRanges.append((from: a, to: b))
+                if b - a <= 2000 {
+                    for p in a...b { ports.insert(p) }
                 }
-                portSpecs.append(t)
-                report.ports += 1
                 return
             }
         }
-
-        // IP / CIDR
-        if section != "domain" {
-            if let cidr = RuleSet.parseCIDR(hostPart) {
-                cidrList.append(cidr)
-                return
-            }
-            if let ip = RuleSet.ipToUInt(hostPart) {
-                exactIPs.insert(ip)
-                report.exactIPs += 1
-                return
-            }
-        }
-
-        // 域名
-        if hostPart.contains(".") || section == "domain" || section == "direct" {
-            let d = RuleSet.normalise(hostPart)
-            guard RuleSet.isValidDomain(d) else { report.skipped += 1; return }
-            insertDomain(d, direct: isDirect || section == "direct")
+        if let p = Int(t), p > 0, p <= 65535 {
+            ports.insert(p)
             return
         }
-
         report.skipped += 1
     }
 
-    private mutating func insertDomain(_ raw: String, direct: Bool) {
-        let d = RuleSet.normalise(raw)
-        guard RuleSet.isValidDomain(d) else { report.skipped += 1; return }
-        if direct {
-            directDomains.insert(d); report.direct += 1
-        } else {
-            domains.insert(d); report.domains += 1
+    // MARK: - 兼容层（老规则包）
+
+    @discardableResult
+    private mutating func compatAbsorb(_ line: String, allowDirect: Bool) -> Bool {
+        var t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if t.hasPrefix("@@") {
+            guard allowDirect else { return false }
+            t.removeFirst(2)
+            while t.hasPrefix("|") { t.removeFirst() }
+            guard let d = RuleSet.parseDomain(t) else { return false }
+            insertDomain(d.0, direct: true)
+            return true
         }
+        if t.hasPrefix("||") { t.removeFirst(2) }
+        while t.hasPrefix("|") { t.removeFirst() }
+        guard let d = RuleSet.parseDomain(t) else { return false }
+        insertDomain(d.0, direct: d.1)
+        return true
     }
 
-    private func isPortOnly(_ s: String) -> Bool {
-        guard !s.isEmpty, s.allSatisfy({ $0.isNumber || $0 == "-" }) else { return false }
-        return Int(s) != nil || s.contains("-")
+    // MARK: - 写入口（去重 + 放行优先）
+
+    private mutating func insertDomain(_ raw: String, direct: Bool) {
+        guard let d = RuleSet.parseDomain(raw) else {
+            report.skipped += 1
+            return
+        }
+        let name = d.0
+        guard !name.isEmpty else { return }
+        if direct || d.1 {
+            directDomains.insert(name)
+            domains.remove(name)
+        } else if !directDomains.contains(name) {
+            domains.insert(name)
+        }
     }
 
     private static func isValidDomain(_ s: String) -> Bool {
         guard s.count >= 3, s.count <= 253, s.contains(".") else { return false }
         guard !s.contains(" ") else { return false }
-        // 允许字母数字、连字符、下划线、点；中文等交给系统转 IDN 后再说
         let ok = CharacterSet(charactersIn:
             "abcdefghijklmnopqrstuvwxyz0123456789-._").isSuperset(of: CharacterSet(charactersIn: s))
         return ok
     }
 
-    private static func parseCIDR(_ s: String) -> (UInt32, UInt32)? {
-        guard s.contains("/") else { return nil }
-        let parts = s.split(separator: "/")
-        guard parts.count == 2,
-              let base = ipToUInt(String(parts[0])),
-              let bits = Int(parts[1]), bits >= 0, bits <= 32 else { return nil }
-        let mask: UInt32 = bits == 0 ? 0 : (0xFFFFFFFF << UInt32(32 - bits)) & 0xFFFFFFFF
-        let network = base & mask
-        let broadcast = network | ~mask
-        return (network, broadcast)
-    }
+    // MARK: - 索引重建
 
-    /// 区间合并：重叠 / 相邻的段并成一个，之后二分才成立
-    private static func merge(_ list: [(UInt32, UInt32)]) -> [Segment] {
-        guard !list.isEmpty else { return [] }
-        let sorted = list.sorted { $0.0 < $1.0 }
-        var out: [Segment] = []
-        var curStart = sorted[0].0
-        var curEnd = sorted[0].1
-        for (s, e) in sorted.dropFirst() {
-            let adjacent = curEnd != UInt32.max ? (s == curEnd + 1) : false
-            if s <= curEnd || adjacent {
-                if e > curEnd { curEnd = e }
+    private mutating func rebuild() {
+        exact32.removeAll()
+        prefixRules.removeAll()
+        directRules.removeAll()
+        routes.removeAll()
+
+        var ranges: [(UInt32, UInt32)] = []
+
+        for rule in ipRules {
+            if rule.direct {
+                directRules.append(rule)
+                continue
+            }
+            if rule.prefix == 32 && rule.portFrom < 0 {
+                exact32.insert(rule.base)
             } else {
-                out.append(Segment(start: curStart, end: curEnd))
-                curStart = s; curEnd = e
+                prefixRules.append(rule)
+            }
+            /* 路由只收不限端口的规则：带端口的 IP 在原版里也不进路由 */
+            if rule.portFrom < 0 {
+                let mask = RuleSet.mask(for: rule.prefix)
+                let start = rule.base & mask
+                let end = start | ~mask
+                ranges.append((start, end))
             }
         }
-        out.append(Segment(start: curStart, end: curEnd))
+
+        routes = RuleSet.cidrs(from: RuleSet.mergeRanges(ranges))
+
+        var rep = ParseReport()
+        rep.exactIPs = exact32.count
+        rep.cidrs = prefixRules.count
+        rep.domains = domains.count
+        rep.direct = directDomains.count + directRules.count
+        rep.ports = ports.count
+        rep.routes = routes.count
+        rep.skipped = report.skipped
+        report = rep
+    }
+
+    // MARK: - 合并（内置规则 + 云端规则）
+
+    func merging(_ other: RuleSet) -> RuleSet {
+        var out = RuleSet()
+        out.ipRules = ipRules + other.ipRules
+        out.directDomains = directDomains.union(other.directDomains)
+        out.domains = domains.union(other.domains).subtracting(out.directDomains)
+        out.ports = ports.union(other.ports)
+        out.portRanges = portRanges + other.portRanges
+        out.report.skipped = report.skipped + other.report.skipped
+        out.rebuild()
         return out
     }
 
-    private static func normalise(_ s: String) -> String {
-        var v = s.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
-        // 订阅里常见的注解符号：@@||x^ / |x| / *.x
-        while v.hasPrefix("@@") || v.hasPrefix("||") || v.hasPrefix("|")
-                || v.hasPrefix("*.") || v.hasPrefix(".") {
-            if v.hasPrefix("@@") || v.hasPrefix("||") { v.removeFirst(2) }
-            else { v.removeFirst() }
-        }
-        while v.hasSuffix("^") || v.hasSuffix("|") || v.hasSuffix("*") { v.removeLast() }
-        if v.hasSuffix(".") { v.removeLast() }
-        // 常见前缀噪声
-        for junk in ["https://", "http://", "www."] where v.hasPrefix(junk) {
-            v.removeFirst(junk.count)
-        }
-        if let slash = v.firstIndex(of: "/") { v = String(v[v.startIndex..<slash]) }
-        if let colon = v.firstIndex(of: ":") { v = String(v[v.startIndex..<colon]) }
-        return v
-    }
+    // MARK: - 内置规则
 
-    static func ipToUInt(_ ip: String) -> UInt32? {
-        let parts = ip.split(separator: ".")
-        guard parts.count == 4 else { return nil }
-        var v: UInt32 = 0
-        for p in parts {
-            guard let n = UInt32(p), n <= 255 else { return nil }
-            v = (v << 8) | n
+    /// 包里自带的规则（Resources/rules.txt）
+    static func bundled(named name: String = "rules") -> RuleSet? {
+        var urls: [URL] = []
+        if let u = Bundle.main.url(forResource: name, withExtension: "txt") { urls.append(u) }
+        for bundle in Bundle.allBundles {
+            if let u = bundle.url(forResource: name, withExtension: "txt") { urls.append(u) }
         }
-        return v
+        for url in urls {
+            if let text = try? String(contentsOf: url, encoding: .utf8) {
+                let set = RuleSet.parse(text: text)
+                if !set.isEmpty { return set }
+            }
+        }
+        return nil
     }
 
     // MARK: - 判定
 
-    func isIPBlocked(_ ip: UInt32) -> Bool {
-        if exactIPs.contains(ip) { return true }
-        guard !segments.isEmpty else { return false }
-        // 二分：找最后一个 start <= ip 的区间
-        var lo = 0, hi = segments.count - 1, hit = -1
-        while lo <= hi {
-            let mid = (lo + hi) / 2
-            if segments[mid].start <= ip {
-                hit = mid; lo = mid + 1
-            } else {
-                hi = mid - 1
-            }
+    private static func mask(for prefix: Int) -> UInt32 {
+        prefix <= 0 ? 0 : ((0xFFFF_FFFF << UInt32(32 - min(32, prefix))) & 0xFFFF_FFFF)
+    }
+
+    private static func matchIp(_ rule: IPRule, _ ip: UInt32) -> Bool {
+        if rule.prefix >= 32 { return rule.base == ip }
+        let m = mask(for: rule.prefix)
+        return (ip & m) == (rule.base & m)
+    }
+
+    private static func matchPort(_ rule: IPRule, _ port: Int) -> Bool {
+        if rule.portFrom < 0 { return true }
+        return port >= rule.portFrom && port <= rule.portTo
+    }
+
+    /// 放行优先，再查拦截（与原版 isBlockedIp 同序）
+    func isBlockedIp(_ ip: UInt32, port: Int) -> Bool {
+        for rule in directRules where RuleSet.matchPort(rule, port) {
+            if RuleSet.matchIp(rule, ip) { return false }
         }
-        guard hit >= 0 else { return false }
-        return ip <= segments[hit].end
+        if exact32.contains(ip) { return true }
+        for rule in prefixRules where RuleSet.matchPort(rule, port) {
+            if RuleSet.matchIp(rule, ip) { return true }
+        }
+        return false
     }
 
-    func isIPBlocked(_ dotted: String) -> Bool {
+    func isBlockedIp(_ ip: UInt32) -> Bool { isBlockedIp(ip, port: 0) }
+
+    func isBlockedIp(_ dotted: String) -> Bool {
         guard let v = RuleSet.ipToUInt(dotted) else { return false }
-        return isIPBlocked(v)
+        return isBlockedIp(v)
     }
 
-    /// 端口命中（规则里显式给了端口才参与判定）
+    /// 隧道每个包走这里
+    func shouldBlock(ip: UInt32, port: UInt16) -> Bool {
+        isBlockedIp(ip, port: Int(port))
+    }
+
+    /// 端口集合只保留、不参与判定（与原版一致：1953 条一条都不生效）
     func isPortBlocked(_ port: UInt16) -> Bool {
         !ports.isEmpty && ports.contains(Int(port))
     }
 
-    /// 隧道每个包走这里：IP 优先，纯端口规则库再按端口判
-    func shouldBlock(ip: UInt32, port: UInt16) -> Bool {
-        if isIPBlocked(ip) { return true }
-        guard !ports.isEmpty else { return false }
-        // 有 IP 规则时，端口不单独放行/拦截，避免误伤同 IP 的其它服务
-        if !exactIPs.isEmpty || !segments.isEmpty { return false }
-        return ports.contains(Int(port))
+    /// 域名：放行优先，再逐级后缀命中（写 a.com 等于 *.a.com，但不是裸 endsWith）
+    func isBlockedDomain(_ host: String) -> Bool {
+        var h = host.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        while h.hasPrefix(".") { h.removeFirst() }
+        while h.hasSuffix(".") { h.removeLast() }
+        if h.isEmpty { return false }
+        if matches(h, in: directDomains) { return false }
+        return matches(h, in: domains)
     }
 
-    /// 精确 + 子域匹配：blocked 里含 "qq.com" 则 "a.b.qq.com" 命中
-    func isDomainBlocked(_ domain: String) -> Bool {
-        let d = RuleSet.normalise(domain)
-        if d.isEmpty { return false }
-        if matches(d, in: directDomains) { return false }
-        return matches(d, in: domains)
-    }
-
-    private func matches(_ d: String, in set: Set<String>) -> Bool {
+    private func matches(_ host: String, in set: Set<String>) -> Bool {
         if set.isEmpty { return false }
-        if set.contains(d) { return true }
-        var cursor = d
+        if set.contains(host) { return true }
+        var cursor = host
         while let dot = cursor.firstIndex(of: ".") {
             cursor = String(cursor[cursor.index(after: dot)...])
             if set.contains(cursor) { return true }
@@ -360,152 +507,93 @@ struct RuleSet {
 
     /// 隧道路由方案
     ///
-    /// iOS 的关键行为：**只有 split tunnel 时，系统经常不把 DNS 查询交给隧道**，
-    /// 表现就是「开了防护，域名规则一条都碰不到」。所以这里改成
-    /// 「默认路由指向隧道 + 把规则之外的地址排除出去」：
-    /// 系统认为隧道是默认出口 → DNS 设置一定生效；真正走隧道的只有规则 IP 段。
+    /// 1.1.0 起改成「只接管规则段」的窄口模型：
+    ///   included = 规则里的 IP 段 + 假 DNS 的 /32，不做 0.0.0.0/0 全接管，
+    ///   也不生成补集例外。非规则流量压根不进隧道，不存在「补集装不下就降级」。
     struct RoutePlan {
-        /// true = included 里放 0.0.0.0/0，靠 excluded 把非规则流量放回物理网络
-        var hijackAll = false
         var included: [(String, Int)] = []
         var excluded: [(String, Int)] = []
-        /// 补集太碎时退回「只接管规则段」
+        /// 保留字段：老逻辑的全接管方案，1.1.0 不再产生
+        var hijackAll = false
+        /// true = 连规则段都没接管上（只有 DNS）
         var degraded = false
 
         var routeCount: Int { included.count + excluded.count }
 
         var description: String {
-            if degraded { return "按规则段接管 \(included.count) 条" }
-            return "全接管 · 例外 \(excluded.count) 条"
+            if degraded { return "DNS 接管 · 无 IP 路由" }
+            return "规则接管 · 路由 \(included.count) 条"
         }
     }
 
-    /// 规则命中的地址区间（合并后，闭区间、升序、互不相交）
-    ///
-    /// `coarsenTo`：把每个区间扩张到 2^(32-bits) 对齐边界，用于路由条数过多时
-    /// 降低补集碎片（代价是同一块里没列进规则的地址也会进隧道）。
-    func blockedRanges(coarsenTo bits: Int = 32) -> [(UInt32, UInt32)] {
-        var list: [(UInt32, UInt32)] = segments.map { ($0.start, $0.end) }
-        if !exactIPs.isEmpty {
-            list.append(contentsOf: exactIPs.map { ($0, $0) })
-        }
-        guard !list.isEmpty else { return [] }
-        list.sort { $0.0 < $1.0 }
-
-        var out: [(UInt32, UInt32)] = []
-        var curStart = list[0].0
-        var curEnd = list[0].1
-        for (s, e) in list.dropFirst() {
-            let adjacent = curEnd != UInt32.max && UInt64(s) <= UInt64(curEnd) + 1
-            if adjacent {
-                if e > curEnd { curEnd = e }
-            } else {
-                out.append((curStart, curEnd))
-                curStart = s; curEnd = e
-            }
-        }
-        out.append((curStart, curEnd))
-        return bits < 32 ? RuleSet.coarsen(out, to: bits) : out
-    }
-
-    /// 把区间对齐放大到 2^(32-bits) 的整块，再合并
-    private static func coarsen(_ ranges: [(UInt32, UInt32)],
-                                to bits: Int) -> [(UInt32, UInt32)] {
-        guard bits < 32, !ranges.isEmpty else { return ranges }
-        let step = UInt64(1) << UInt64(32 - bits)
-        var list: [(UInt32, UInt32)] = []
-        for (s, e) in ranges {
-            let a = UInt64(s) / step * step
-            let b = min(UInt64(UInt32.max), (UInt64(e) / step + 1) * step - 1)
-            list.append((UInt32(a), UInt32(b)))
-        }
-        list.sort { $0.0 < $1.0 }
-        var out: [(UInt32, UInt32)] = []
-        var cs = list[0].0, ce = list[0].1
-        for (s, e) in list.dropFirst() {
-            if UInt64(s) <= UInt64(ce) + 1 {
-                if e > ce { ce = e }
-            } else {
-                out.append((cs, ce)); cs = s; ce = e
-            }
-        }
-        out.append((cs, ce))
-        return out
-    }
-
-    /// 生成路由方案。
-    ///
-    /// - `forceInside`：必须留在隧道里的地址（DNS 代理、黑洞地址）。
-    ///   它们在补集里被挖掉，否则系统会把 DNS 查询送回物理网络，整条链就断了。
-    /// - `maxRoutes`：补集 CIDR 太多时退回保守方案，避免网络设置装不下起不来。
-    func routePlan(forceInside: [UInt32] = [], maxRoutes: Int = 9000,
+    /// - Parameter forceInside: 必须留在隧道里的地址（假 DNS 等），补成 /32
+    /// - Parameter maxRoutes: 超过这个条数就按 /24 → /20 合并，避免设置装不下
+    func routePlan(forceInside: [UInt32] = [], maxRoutes: Int = 6000,
                    coarsenTo bits: Int = 32) -> RoutePlan {
-        let blocked = blockedRanges(coarsenTo: bits)
-
-        guard !blocked.isEmpty else {
-            // 没有 IP 规则：只接管 DNS，别的都别碰
-            var plan = RoutePlan()
-            plan.included = forceInside.map { (RuleSet.uintToIP($0), 32) }
-            return plan
-        }
-
-        var outside = RuleSet.complement(of: blocked)
-        outside = RuleSet.removePoints(forceInside, from: outside)
-        let excluded = RuleSet.cidrs(from: outside)
-
-        if excluded.count > maxRoutes {
-            // 补集碎到系统可能装不下：退回「只把规则段拉进隧道」，
-            // 宁可 DNS 可能不生效，也不能让隧道起不来 / 用户断网。
-            var plan = RoutePlan()
-            plan.degraded = true
-            plan.included = RuleSet.cidrs(from: blocked)
-            plan.included.append(contentsOf: forceInside.map { (RuleSet.uintToIP($0), 32) })
-            return plan
-        }
-
         var plan = RoutePlan()
-        plan.hijackAll = true
-        plan.included = [("0.0.0.0", 0)]
-        plan.excluded = excluded
+
+        var included: [(String, Int)] = bits < 32 ? RuleSet.aggregate(routes, to: bits) : routes
+        if included.count > maxRoutes {
+            included = RuleSet.aggregate(routes, to: 24)
+            if included.count > maxRoutes { included = RuleSet.aggregate(routes, to: 20) }
+            if included.count > maxRoutes { included = RuleSet.aggregate(routes, to: 16) }
+        }
+
+        var seen = Set<String>()
+        for item in included {
+            let key = "\(item.0)/\(item.1)"
+            if seen.insert(key).inserted {
+                plan.included.append(item)
+            }
+        }
+        for ip in forceInside {
+            let dotted = RuleSet.uintToIP(ip)
+            let key = "\(dotted)/32"
+            if seen.insert(key).inserted {
+                plan.included.append((dotted, 32))
+            }
+        }
+
+        if plan.included.isEmpty { plan.degraded = true }
         return plan
     }
 
-    /// 0.0.0.0/0 减去这些区间
-    private static func complement(of ranges: [(UInt32, UInt32)]) -> [(UInt32, UInt32)] {
-        var out: [(UInt32, UInt32)] = []
-        var cursor: UInt64 = 0
+    /// 把 CIDR 列表按更大的粒度合并（规则段挨得近时合并，条数就下来了）
+    private static func aggregate(_ list: [(String, Int)], to bits: Int) -> [(String, Int)] {
+        var ranges: [(UInt32, UInt32)] = []
+        for item in list {
+            guard let base = ipToUInt(item.0) else { continue }
+            let mask = mask(for: item.1)
+            ranges.append((base & mask, (base & mask) | ~mask))
+        }
+        guard !ranges.isEmpty else { return list }
+        let step = UInt64(1) << UInt64(32 - bits)
+        var coarse: [(UInt32, UInt32)] = []
         for (s, e) in ranges {
-            if UInt64(s) > cursor {
-                out.append((UInt32(cursor), s - 1))
-            }
-            let next = UInt64(e) + 1
-            cursor = max(cursor, next)
-            if cursor > UInt64(UInt32.max) { break }
+            let a = UInt64(s) / step * step
+            let b = min(UInt64(UInt32.max), (UInt64(e) / step + 1) * step - 1)
+            coarse.append((UInt32(a), UInt32(b)))
         }
-        if cursor <= UInt64(UInt32.max) {
-            out.append((UInt32(cursor), UInt32.max))
-        }
-        return out
+        return cidrs(from: mergeRanges(coarse))
     }
 
-    /// 把若干单点从区间里挖掉（用于强制把 DNS / 黑洞地址留在隧道内）
-    private static func removePoints(_ points: [UInt32],
-                                     from ranges: [(UInt32, UInt32)]) -> [(UInt32, UInt32)] {
-        guard !points.isEmpty else { return ranges }
+    static func mergeRanges(_ list: [(UInt32, UInt32)]) -> [(UInt32, UInt32)] {
+        guard !list.isEmpty else { return [] }
+        let sorted = list.sorted { $0.0 < $1.0 }
         var out: [(UInt32, UInt32)] = []
-        for (s, e) in ranges {
-            var pieces: [(UInt32, UInt32)] = [(s, e)]
-            for p in points {
-                var next: [(UInt32, UInt32)] = []
-                for (a, b) in pieces {
-                    if p < a || p > b { next.append((a, b)); continue }
-                    if a < p { next.append((a, p - 1)) }
-                    if p < b { next.append((p + 1, b)) }
-                }
-                pieces = next
+        var curStart = sorted[0].0
+        var curEnd = sorted[0].1
+        for (s, e) in sorted.dropFirst() {
+            let adjacent = curEnd != UInt32.max && UInt64(s) <= UInt64(curEnd) + 1
+            if s <= curEnd || adjacent {
+                if e > curEnd { curEnd = e }
+            } else {
+                out.append((curStart, curEnd))
+                curStart = s
+                curEnd = e
             }
-            out.append(contentsOf: pieces)
         }
+        out.append((curStart, curEnd))
         return out
     }
 
@@ -516,7 +604,6 @@ struct RuleSet {
             var s = UInt64(start)
             let e = UInt64(end)
             while s <= e {
-                // s 这一位能覆盖多大（按对齐）
                 var alignSize = 32
                 if s != 0 {
                     alignSize = 0
@@ -524,7 +611,6 @@ struct RuleSet {
                         alignSize += 1
                     }
                 }
-                // 剩余跨度能覆盖多大
                 let span = e - s + 1
                 var spanSize = 0
                 while spanSize < 32 && (UInt64(1) << UInt64(spanSize + 1)) <= span {
@@ -537,6 +623,19 @@ struct RuleSet {
             }
         }
         return out
+    }
+
+    // MARK: - 地址工具
+
+    static func ipToUInt(_ ip: String) -> UInt32? {
+        let parts = ip.split(separator: ".")
+        guard parts.count == 4 else { return nil }
+        var value: UInt32 = 0
+        for part in parts {
+            guard part.count <= 3, let n = UInt32(part), n <= 255 else { return nil }
+            value = (value << 8) | n
+        }
+        return value
     }
 
     static func uintToIP(_ v: UInt32) -> String {

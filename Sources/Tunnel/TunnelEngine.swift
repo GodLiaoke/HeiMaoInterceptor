@@ -2,8 +2,15 @@ import Foundation
 import NetworkExtension
 import Darwin
 
-/// 拦截内核：接管 DNS + 对命中规则的 IP 断链
-/// 不转发任何业务流量，命中 TCP 直接回 RST，命中 UDP 直接丢包。
+/// 拦截内核（ACE 同构的用户态判定）
+///
+/// 三条链路，互不交叉：
+///   1. IP 层：进隧道的 TCP/UDP 命中规则 → TCP 回 40 字节 RST，UDP 静默丢弃
+///   2. DNS 层：命中域名 → 直接伪造应答（A 答 0.0.0.0 / TTL 60，其它类型答 0 记录）
+///   3. 其余：一律不转发（这个实现里没有「未命中就放出去」的路径，与原版一致）
+///
+/// 路由只把规则里的 IP 段和假 DNS 的 /32 拉进隧道，所以「未命中」本来就不该出现；
+/// 真出现了只计数，不在这里断用户的正常流量。
 final class TunnelEngine {
 
     struct Stats {
@@ -18,7 +25,7 @@ final class TunnelEngine {
         var tunnelPackets = 0
         /// 收到的 DNS 查询数（含转发和黑洞）
         var dnsQueries = 0
-        /// 不该进隧道的包（路由补集没生效时会冒出来）
+        /// 不该进隧道的包（路由没生效时会冒出来）
         var stray = 0
         var startedAt = Date()
 
@@ -44,20 +51,13 @@ final class TunnelEngine {
     private struct CacheEntry {
         let response: Data
         let expireAt: TimeInterval
-        /// 这条缓存是「拦截答复」还是「上游放行答复」
-        /// 缓存命中同样要计拦截数，否则同一个被拦域名 30 秒内反复查询
-        /// 只有第一次计数，表现就是「拦得住但不涨」
-        let blocked: Bool
     }
 
     private let flow: NEPacketTunnelFlow
     private let dnsIPv4: UInt32
     private let clientIPv4: UInt32
-    /// 域名黑洞地址：命中的域名都解析到这里，连接一进来就断
-    private let sinkholeIPv4: UInt32
 
-    /// 规则快照 + DNS 缓存共用一把锁。都是纳秒级操作，不排队、不切线程，
-    /// 比每包一次 DispatchQueue.sync 快一个数量级。
+    /// 规则快照 + DNS 缓存共用一把锁。都是纳秒级操作，不排队、不切线程。
     private let stateLock = NSLock()
     private var rules: RuleSet
     private var dnsCache: [String: CacheEntry] = [:]
@@ -77,24 +77,20 @@ final class TunnelEngine {
     private var running = false
     private let runningLock = NSLock()
 
+    init(flow: NEPacketTunnelFlow, rules: RuleSet, dnsIP: String, clientIP: String) {
+        self.flow = flow
+        self.rules = rules
+        self.dnsIPv4 = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F_0001
+        self.clientIPv4 = RuleSet.ipToUInt(clientIP) ?? 0x0A6F_0002
+    }
+
     /// 外部（provider）读取统计
     func snapshot() -> [String: Any] {
         statsLock.lock(); defer { statsLock.unlock() }
         return stats.json
     }
 
-    init(flow: NEPacketTunnelFlow, rules: RuleSet,
-         dnsIP: String, clientIP: String, sinkholeIP: String) {
-        self.flow = flow
-        self.rules = rules
-        self.dnsIPv4 = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F0001
-        self.clientIPv4 = RuleSet.ipToUInt(clientIP) ?? 0x0A6F0002
-        self.sinkholeIPv4 = RuleSet.ipToUInt(sinkholeIP) ?? 0x0A6F0009
-    }
-
-    /// 规则热更新：必须连 DNS 缓存一起清掉。
-    /// 否则某个域名从「放行」改成「拦截」后，缓存里还留着旧的真实 IP，
-    /// 客户端拿到缓存直接连过去，拦截就漏了。
+    /// 规则热更新：必须连 DNS 缓存一起清掉，否则改过的域名还会拿到旧结果
     func update(rules: RuleSet) {
         stateLock.lock()
         self.rules = rules
@@ -107,9 +103,7 @@ final class TunnelEngine {
     // MARK: - 主循环
 
     func start() {
-        /* 隧道被系统重启（切网 / 内存回收 / 弱网重连）时把刚才的数字接上。
-           只接 30 秒内的：隔久了就是新的一次防护，不该继续累计。
-           不接的话用户会看到「刚拦了几百，一重连变 0」，也是「不计数」的常见观感。 */
+        /* 隧道被系统重启时把刚才的数字接上（只接 30 秒内的） */
         var seed = Stats()
         let prev = StatsBridge.read()
         if let at = prev["bridgeAt"] as? Int,
@@ -126,7 +120,6 @@ final class TunnelEngine {
         readLoop()
     }
 
-    /// 落盘快照读回来的数字容错（Int / NSNumber / String 都认）
     private static func value(_ any: Any?) -> Int {
         if let v = any as? Int { return v }
         if let v = any as? NSNumber { return v.intValue }
@@ -154,63 +147,44 @@ final class TunnelEngine {
         }
     }
 
-    // MARK: - 单包处理
+    // MARK: - 单包处理（对应 Dh.handle）
 
     private func handle(_ data: Data) {
         guard let p = PacketCodec.parse(data) else { return }
         statsLock.lock(); stats.tunnelPackets += 1; statsLock.unlock()
 
-        /* 域名黑洞：命中的域名解析到 sinkhole 地址，连接进来一律断掉。
-           HTTPS / QUIC 都在这里断，所以不需要解密 TLS，也不需要装证书。 */
-        if p.dstIP == sinkholeIPv4 {
-            if p.proto == 6, p.tcp != nil {
-                dropTCP(p, key: PacketCodec.flowKey(p))
-            } else if p.proto == 17 {
-                statsLock.lock()
-                stats.blockedPackets += 1
-                stats.blockedConn += 1
-                stats.blockedUDP += 1
-                statsLock.unlock()
-            }
-            return
-        }
-
         if p.proto == 17, let udp = p.udp {
-            /* 只要是 53 端口的 UDP 就当 DNS 处理，不挑目标地址。
-               系统在隧道里可能仍按旧的 DNS 服务器发查询（换网 / 缓存 / DoH 回退），
-               只认 dnsIPv4 会把这些查询漏掉 —— 那正是「DNS 没接管」的典型表现。 */
+            /* DNS：进隧道的查询只可能是发给假 DNS 的（路由只放了它的 /32），
+               这里不挑目标地址 —— 换网 / 系统缓存回退时仍可能发到旧地址 */
             if udp.dstPort == 53 {
                 statsLock.lock(); stats.dnsQueries += 1; statsLock.unlock()
                 handleDNS(p)
                 return
             }
-            if isBlocked(p.dstIP, port: udp.dstPort) {
+            if isBlocked(p.dstIP, port: Int(udp.dstPort)) {
                 statsLock.lock()
                 stats.blockedPackets += 1
                 stats.blockedUDP += 1
                 statsLock.unlock()
-                return          // UDP 直接丢
+            } else {
+                statsLock.lock(); stats.stray += 1; statsLock.unlock()
             }
-            statsLock.lock(); stats.stray += 1; statsLock.unlock()
-            return
+            return                      // UDP 一律不转发
         }
 
         if p.proto == 6, let tcp = p.tcp {
-            if isBlocked(p.dstIP, port: tcp.dstPort) {
+            if isBlocked(p.dstIP, port: Int(tcp.dstPort)) {
                 dropTCP(p, key: PacketCodec.flowKey(p))
             } else {
-                /* 非规则流量正常应该在隧道外（excludedRoutes）。这里收到说明
-                   路由补集没生效，记数用于判断，不在这里断用户的路。 */
                 statsLock.lock(); stats.stray += 1; statsLock.unlock()
             }
-            return
+            return                      // TCP 一律不转发
         }
+
+        /* ICMP / 其它协议：丢（原版也是直接 return） */
     }
 
     /// 断一条 TCP 连接
-    ///
-    /// 只有 SYN 或者这条连接的第一个包才回 RST：客户端重传时会连发好几个包，
-    /// 每个都回 RST 会把统计打爆、也给内核制造无谓压力。
     private func dropTCP(_ p: PacketCodec.Parsed, key: UInt64) {
         var send = false
         let now = Date().timeIntervalSince1970
@@ -239,22 +213,17 @@ final class TunnelEngine {
         }
     }
 
-    /// IP + 端口一起判定（一次加锁，避免每个包锁两次）
-    ///
-    /// 端口规则的语义：
-    ///   - 规则库里有 IP 时，命中 IP 就拦，端口只是附加信息，不额外限制；
-    ///   - 规则库只有端口（纯端口黑名单）时，按目标端口拦。
-    private func isBlocked(_ ip: UInt32, port: UInt16) -> Bool {
+    private func isBlocked(_ ip: UInt32, port: Int) -> Bool {
         stateLock.lock(); defer { stateLock.unlock() }
-        return rules.shouldBlock(ip: ip, port: port)
+        return rules.isBlockedIp(ip, port: port)
     }
 
     private func isDomainBlocked(_ domain: String) -> Bool {
         stateLock.lock(); defer { stateLock.unlock() }
-        return rules.isDomainBlocked(domain)
+        return rules.isBlockedDomain(domain)
     }
 
-    // MARK: - DNS 缓存
+    // MARK: - DNS 缓存（只缓存放行答复）
 
     private static func cacheKey(_ qname: String, _ qtype: UInt16) -> String {
         "\(qname.lowercased())|\(qtype)"
@@ -269,36 +238,21 @@ final class TunnelEngine {
         }
         stateLock.unlock()
 
-        // 缓存里存的是上一次的应答，DNS 事务 ID 必须改成本次查询的，否则客户端会丢弃
         var out = entry.response
         if out.count >= 2 {
             out[0] = UInt8((id >> 8) & 0xFF)
             out[1] = UInt8(id & 0xFF)
         }
-        /* 缓存命中也要计数：命中拦截答复 = 又拦了一次。
-           以前这里只加 cacheHits，所以同一个域名被反复请求时，
-           拦截一直在生效（客户端拿到黑洞地址），数字却纹丝不动。 */
-        statsLock.lock()
-        stats.cacheHits += 1
-        if entry.blocked {
-            stats.blockedPackets += 1
-            stats.blockedDomains += 1
-        }
-        statsLock.unlock()
+        statsLock.lock(); stats.cacheHits += 1; statsLock.unlock()
         return out
     }
 
-    private func storeCache(key: String, response: Data, blocked: Bool) {
+    private func storeCache(key: String, response: Data) {
         guard response.count >= 12 else { return }
-        // 拦截应答短一些（域名状态可能被后台改动），放行应答长一些
-        let ttl: TimeInterval = blocked ? 30 : 90
         stateLock.lock()
-        if dnsCache[key] == nil {
-            dnsCacheKeys.append(key)
-        }
+        if dnsCache[key] == nil { dnsCacheKeys.append(key) }
         dnsCache[key] = CacheEntry(response: response,
-                                   expireAt: Date().timeIntervalSince1970 + ttl,
-                                   blocked: blocked)
+                                   expireAt: Date().timeIntervalSince1970 + 90)
         if dnsCacheKeys.count > dnsCacheLimit {
             let drop = dnsCacheKeys.prefix(256)
             for k in drop { dnsCache.removeValue(forKey: k) }
@@ -307,46 +261,45 @@ final class TunnelEngine {
         stateLock.unlock()
     }
 
-    // MARK: - DNS
+    // MARK: - DNS 子链路（对应 Dh.handleDns）
 
     private func handleDNS(_ p: PacketCodec.Parsed) {
         guard let udp = p.udp else { return }
         let payload = p.payload
+
         guard let query = DNSMessage.parseQuery(payload) else {
+            /* 问题段解析失败：原样送去上游（原版也是 forward，不是丢弃） */
             forwardDNS(payload, from: p, udp: udp, cacheKey: nil)
             return
         }
 
         let key = TunnelEngine.cacheKey(query.qname, query.qtype)
 
-        if let cached = cachedResponse(key: key, id: query.id) {
-            let out = PacketCodec.buildUDP(src: p.dstIP, dst: p.srcIP,
-                                           srcPort: udp.dstPort, dstPort: udp.srcPort,
-                                           payload: cached)
-            write([out])
-            return
-        }
-
-        let blocked = isDomainBlocked(query.qname)
-        if blocked {
-            let answer = DNSMessage.buildSinkhole(for: query, ip: sinkholeIPv4)
-            storeCache(key: key, response: answer, blocked: true)
-            let out = PacketCodec.buildUDP(src: p.dstIP, dst: p.srcIP,
-                                           srcPort: udp.dstPort, dstPort: udp.srcPort,
-                                           payload: answer)
-            write([out])
+        if isDomainBlocked(query.qname) {
+            let answer = DNSMessage.buildSinkhole(for: query)
+            sendDNS(answer, from: p.dstIP, to: p.srcIP, port: udp.srcPort)
             statsLock.lock()
             stats.blockedPackets += 1
             stats.blockedDomains += 1
             statsLock.unlock()
-        } else {
-            forwardDNS(payload, from: p, udp: udp, cacheKey: key)
+            return
         }
+
+        if let cached = cachedResponse(key: key, id: query.id) {
+            sendDNS(cached, from: p.dstIP, to: p.srcIP, port: udp.srcPort)
+            return
+        }
+
+        forwardDNS(payload, from: p, udp: udp, cacheKey: key)
     }
 
     private func forwardDNS(_ payload: Data, from p: PacketCodec.Parsed,
                             udp: PacketCodec.UDPInfo, cacheKey: String?) {
         statsLock.lock(); stats.passedDNS += 1; statsLock.unlock()
+        let clientIP = p.srcIP
+        let clientPort = udp.srcPort
+        let serverIP = p.dstIP
+
         dnsQueue.async { [weak self] in
             guard let self = self else { return }
             self.dnsSlots.wait()
@@ -354,13 +307,17 @@ final class TunnelEngine {
 
             guard let response = DNSUpstream.query(payload) else { return }
             if let key = cacheKey {
-                self.storeCache(key: key, response: response, blocked: false)
+                self.storeCache(key: key, response: response)
             }
-            let out = PacketCodec.buildUDP(src: p.dstIP, dst: p.srcIP,
-                                           srcPort: udp.dstPort, dstPort: udp.srcPort,
-                                           payload: response)
-            self.write([out])
+            self.sendDNS(response, from: serverIP, to: clientIP, port: clientPort)
         }
+    }
+
+    /// 回包：源地址固定成假 DNS（10.111.0.1），源端口 53
+    private func sendDNS(_ payload: Data, from src: UInt32, to dst: UInt32, port: UInt16) {
+        let packet = PacketCodec.buildUDP(src: src, dst: dst,
+                                          srcPort: 53, dstPort: port, payload: payload)
+        write([packet])
     }
 
     private func write(_ packets: [Data]) {
@@ -372,11 +329,9 @@ final class TunnelEngine {
 
 /// 上游 DNS 转发
 ///
-/// 之前的实现每个查询新建 socket、串行回退、超时 2.5s，一次网页加载几十个域名
-/// 时首屏会明显变慢。现在：
 ///   - socket 用 connect 绑定上游，只收这一家的回包（不会被串话 / 投毒干扰）
 ///   - 校验事务 ID 与请求一致
-///   - 单个上游 900ms 超时，失败立刻换下一个
+///   - 单个上游 900ms 超时，失败立刻换下一个（三个都失败就不回包，客户端自己超时）
 enum DNSUpstream {
 
     static func query(_ payload: Data, timeout: Int32 = 900) -> Data? {
@@ -427,10 +382,8 @@ enum DNSUpstream {
         }
         guard n >= 12 else { return nil }
 
-        // 事务 ID 必须对得上，否则是别的查询的回包（或者上游在乱塞东西）
         let gotID = UInt16(buf[0]) << 8 | UInt16(buf[1])
         guard gotID == wantID else { return nil }
-        // QR 位必须为 1
         guard buf[2] & 0x80 != 0 else { return nil }
 
         return Data(buf[0..<n])

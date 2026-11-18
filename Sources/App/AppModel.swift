@@ -129,7 +129,12 @@ final class AppModel: ObservableObject {
 
     func refreshRules() {
         let rs = RuleService.shared
-        let set = rs.currentSet
+        /* 界面显示的是「内置规则 + 云端规则」合并后的实际条数，
+           否则云端还没拉下来时界面显示 0，看着像规则没生效。 */
+        var set = rs.currentSet
+        if let builtin = RuleSet.bundled() {
+            set = set.isEmpty ? builtin : set.merging(builtin)
+        }
         ruleCounts = (set.summary.ips, set.domains.count)
         rulePorts = set.report.ports
         ruleSource = ConfigStore.shared.rulesSourceLabel
@@ -651,9 +656,10 @@ final class AppModel: ObservableObject {
         var line = "收包 \(tunnelPackets) · DNS \(dns) · 拦截 \(blocked)"
         if stray > 0 { line += " · 旁路 \(stray)" }
         if let age = StatsBridge.age(stats) { line += " · 心跳 \(age)秒前" }
-        /* 分段模式 = 路由没能全接管，系统 DNS 不会进隧道，域名规则等于没开。
-           这一句直接摆出来，用户不用再猜「为什么域名一条都没拦」 */
-        if routes.hasPrefix("按规则段") { line += " · 分段模式·域名不拦" }
+        /* 1.1.0 起是窄口模型：路由只覆盖规则段 + 假 DNS，不再有「补集装不下」的降级。
+           routeCount = 0 说明 IP 层没接管上，只剩域名拦截。 */
+        let routeCount = num("routeCount")
+        if routeCount == 0 { line += " · 无 IP 路由·仅域名拦截" }
         return line + " · \(phase) · \(routes) · \(statsSource)"
     }
 

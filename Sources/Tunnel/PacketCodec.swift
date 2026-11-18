@@ -73,8 +73,12 @@ enum PacketCodec {
             udp = UDPInfo(srcPort: sp, dstPort: dp, length: len, payloadOffset: ihl + 8)
         }
 
-        let payloadStart = min(totalLength, max(ihl + 8, tcp?.headerLength ?? (udp?.payloadOffset ?? ihl)))
-        let payload = data.subdata(in: payloadStart..<totalLength)
+        var payloadEnd = totalLength
+        if let udp = udp, udp.length >= 8 {
+            payloadEnd = min(totalLength, ihl + udp.length)
+        }
+        let payloadStart = min(payloadEnd, max(ihl + 8, tcp?.headerLength ?? (udp?.payloadOffset ?? ihl)))
+        let payload = data.subdata(in: payloadStart..<max(payloadStart, payloadEnd))
 
         return Parsed(srcIP: srcIP, dstIP: dstIP, proto: proto, ttl: ttl,
                       totalLength: totalLength, ipHeaderLength: ihl,
@@ -89,11 +93,12 @@ enum PacketCodec {
 
     /// 伪造 TCP RST：让本机连接立即失败（不发也不收任何真实流量）
     ///
-    /// 序列号按 RFC 793 3.4 分两种情况，之前一律用 seq=0 是错的：
-    ///   - 握手包（SYN，不带 ACK）：RST 的 SEQ=0，ACK = 对端 SEQ + 1，置 ACK 位
-    ///   - 已建立的连接（带 ACK）：RST 的 SEQ 必须取对端的 ACK（它期待的下一个序号），
-    ///     ACK 字段清零，不置 ACK 位 —— 否则本机 TCP 栈会认为这是窗口外的乱包直接丢掉，
-    ///     用户体感就变成「卡住等超时」而不是「秒失败」
+    /// 与 ACE 3.0 的 sendTcpRst 对齐的固定字段：
+    ///   总长 40、ID 0、DF、TTL 64、window 0、urgent 0
+    ///   握手包（SYN，无 ACK）：seq = 0，ack = 对端 seq + 载荷 + 1，flags = 0x14（RST|ACK）
+    ///   已建立的连接（带 ACK）：seq 取对端的 ACK（它期待的下一个序号），ack = 0，flags = 0x04
+    ///     —— 只有这样才落在对方的接收窗口里，本机 TCP 栈才会当成 RST 处理，
+    ///        否则会被当窗口外乱包丢掉，用户体感变成「卡住等超时」
     static func buildRST(for p: Parsed) -> Data? {
         guard let tcp = p.tcp else { return nil }
 
@@ -104,30 +109,88 @@ enum PacketCodec {
         if tcp.flags & 0x10 != 0 {                         // 已建立连接
             seqNum = tcp.ack
         } else {
-            var ack = tcp.seq + UInt32(tcp.payloadLength)
-            if tcp.isSYN { ack &+= 1 }
-            if tcp.isFIN { ack &+= 1 }
+            var ack = tcp.seq &+ UInt32(tcp.payloadLength)
+            if tcp.isSYN { ack = ack &+ 1 }
+            if tcp.isFIN { ack = ack &+ 1 }
             ackNum = ack
             flags = 0x14                                   // RST | ACK
         }
 
-        var out = Data()
-        out.append(contentsOf: buildIPHeader(src: p.dstIP, dst: p.srcIP, proto: 6,
-                                             payloadLength: 20, ttl: 64))
-        // TCP 头
-        var t = Data()
-        t.append(be16(tcp.dstPort))                        // 源端口 = 原目的端口
-        t.append(be16(tcp.srcPort))                        // 目的端口 = 原源端口
-        t.append(be32bytes(seqNum))
-        t.append(be32bytes(ackNum))
-        t.append(contentsOf: [0x50, flags])                // dataOffset 5
-        t.append(be16(0))                                  // window
-        t.append(be16(0))                                  // checksum 占位
-        t.append(be16(0))                                  // urgent
-        let csum = tcpChecksum(src: p.dstIP, dst: p.srcIP, tcp: t)
-        t.replaceSubrange(16..<18, with: be16(csum))
-        out.append(t)
-        return out
+        let srcIp = p.dstIP
+        let dstIp = p.srcIP
+        let srcPort = tcp.dstPort
+        let dstPort = tcp.srcPort
+
+        var o = [UInt8](repeating: 0, count: 40)
+        o[0] = 0x45                                        // IPv4 / IHL 5
+        o[2] = 0x00; o[3] = 40                             // 总长 40
+        o[6] = 0x40                                        // DF
+        o[8] = 64                                          // TTL 64（固定，不继承原包）
+        o[9] = 6                                           // TCP
+        putU32(&o, 12, srcIp)
+        putU32(&o, 16, dstIp)
+        putU16(&o, 10, ipChecksum(o, 0, 20))
+
+        putU16(&o, 20, srcPort)
+        putU16(&o, 22, dstPort)
+        putU32(&o, 24, seqNum)
+        putU32(&o, 28, ackNum)
+        o[32] = 0x50                                       // data offset 5
+        o[33] = flags
+        putU16(&o, 34, 0)                                  // window 0
+        putU16(&o, 36, 0)                                  // checksum 占位
+        putU16(&o, 38, 0)                                  // urgent 0
+
+        let csum = l4Checksum(src: srcIp, dst: dstIp, proto: 6, seg: Array(o[20..<40]))
+        putU16(&o, 36, csum == 0 ? 0xFFFF : csum)
+        return Data(o)
+    }
+
+    private static func putU16(_ b: inout [UInt8], _ off: Int, _ v: UInt16) {
+        b[off] = UInt8(v >> 8)
+        b[off + 1] = UInt8(v & 0xFF)
+    }
+
+    private static func putU32(_ b: inout [UInt8], _ off: Int, _ v: UInt32) {
+        b[off] = UInt8((v >> 24) & 0xFF)
+        b[off + 1] = UInt8((v >> 16) & 0xFF)
+        b[off + 2] = UInt8((v >> 8) & 0xFF)
+        b[off + 3] = UInt8(v & 0xFF)
+    }
+
+    private static func ipChecksum(_ b: [UInt8], _ off: Int, _ len: Int) -> UInt16 {
+        var sum: UInt32 = 0
+        var i = off
+        let end = off + len
+        while i + 1 < end {
+            sum += (UInt32(b[i]) << 8) | UInt32(b[i + 1])
+            i += 2
+        }
+        if i < end { sum += UInt32(b[i]) << 8 }
+        while (sum >> 16) != 0 { sum = (sum & 0xFFFF) + (sum >> 16) }
+        return UInt16((~sum) & 0xFFFF)
+    }
+
+    private static func l4Checksum(src: UInt32, dst: UInt32, proto: UInt8, seg: [UInt8]) -> UInt16 {
+        var buf: [UInt8] = []
+        buf.append(contentsOf: [UInt8((src >> 24) & 0xFF), UInt8((src >> 16) & 0xFF),
+                                UInt8((src >> 8) & 0xFF), UInt8(src & 0xFF)])
+        buf.append(contentsOf: [UInt8((dst >> 24) & 0xFF), UInt8((dst >> 16) & 0xFF),
+                                UInt8((dst >> 8) & 0xFF), UInt8(dst & 0xFF)])
+        buf.append(0)
+        buf.append(proto)
+        buf.append(UInt8((seg.count >> 8) & 0xFF))
+        buf.append(UInt8(seg.count & 0xFF))
+        buf.append(contentsOf: seg)
+        if buf.count % 2 == 1 { buf.append(0) }
+        var sum: UInt32 = 0
+        var i = 0
+        while i + 1 < buf.count {
+            sum += (UInt32(buf[i]) << 8) | UInt32(buf[i + 1])
+            i += 2
+        }
+        while (sum >> 16) != 0 { sum = (sum & 0xFFFF) + (sum >> 16) }
+        return UInt16((~sum) & 0xFFFF)
     }
 
     /// 连接标识：同一个五元组只回一次 RST

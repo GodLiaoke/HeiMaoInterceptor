@@ -1,6 +1,12 @@
 import Foundation
 
-/// 最小 DNS 处理：解析 QNAME、构造黑洞响应（A=0.0.0.0 / AAAA=::）
+/// 最小 DNS 处理：解析 QNAME、构造黑洞响应
+///
+/// 与 ACE 3.0 的 Dh.buildSinkhole 逐字节对齐：
+///   - A 查询：答一条 `C0 0C 00 01 00 01 00 00 00 3C 00 04 00 00 00 00`
+///     （名字压缩指针 → TYPE A / CLASS IN / TTL 60 / RDLENGTH 4 / 0.0.0.0）
+///   - 非 A 查询（AAAA / HTTPS / SVCB …）：ANCOUNT = 0 的 NODATA，不放任何地址
+///     —— 放真实 AAAA 会被客户端拿去直连，域名规则就绕过了
 enum DNSMessage {
 
     struct Query {
@@ -9,11 +15,11 @@ enum DNSMessage {
         let qname: String
         let qtype: UInt16
         let qclass: UInt16
-        let questionEnd: Int     // question 区结束偏移
+        let questionEnd: Int     // question 区结束偏移（qEnd）
         let raw: Data
     }
 
-    /// 解析查询报文
+    /// 解析查询报文（支持压缩指针，长度上限 255）
     static func parseQuery(_ data: Data) -> Query? {
         guard data.count >= 12 else { return nil }
         let bytes = [UInt8](data)
@@ -22,75 +28,85 @@ enum DNSMessage {
         let qdcount = Int(bytes[4]) << 8 | Int(bytes[5])
         guard qdcount >= 1 else { return nil }
 
-        var offset = 12
-        var labels: [String] = []
-        while offset < bytes.count {
-            let len = Int(bytes[offset])
-            if len == 0 { offset += 1; break }
-            if len & 0xC0 == 0xC0 {
-                // 压缩指针，客户端查询里极少出现，放弃解析
-                return nil
-            }
-            guard offset + 1 + len <= bytes.count else { return nil }
-            let label = String(decoding: bytes[(offset + 1)..<(offset + 1 + len)], as: UTF8.self)
-            labels.append(label)
-            offset += 1 + len
-            if labels.count > 32 { return nil }
-        }
-        guard offset + 4 <= bytes.count else { return nil }
-        let qtype = UInt16(bytes[offset]) << 8 | UInt16(bytes[offset + 1])
-        let qclass = UInt16(bytes[offset + 2]) << 8 | UInt16(bytes[offset + 3])
-        offset += 4
+        guard let (name, end) = readQName(bytes, 12) else { return nil }
+        guard end + 4 <= bytes.count else { return nil }
+        let qtype = UInt16(bytes[end]) << 8 | UInt16(bytes[end + 1])
+        let qclass = UInt16(bytes[end + 2]) << 8 | UInt16(bytes[end + 3])
+        let qEnd = end + 4
 
-        let name = labels.joined(separator: ".")
         return Query(id: id, flags: flags, qname: name, qtype: qtype,
-                     qclass: qclass, questionEnd: offset, raw: data)
+                     qclass: qclass, questionEnd: qEnd, raw: data)
     }
 
-    /// 构造黑洞响应：域名解析到指定的黑洞地址（默认由调用方给隧道内地址），TTL 60
-    ///
-    /// 返回隧道内的 sinkhole 地址（而不是 0.0.0.0）有两个好处：
-    ///   1. 连接会真的进隧道，被我们当场断掉，用户立刻看到失败，不用等系统超时
-    ///   2. 断掉的动作能被统计到，界面上的「HTTPS 拦断」才是真实数字
-    static func buildSinkhole(for q: Query, ip: UInt32) -> Data {
-        /* 只有 A 查询才回一条黑洞 A 记录。
-           AAAA / HTTPS(SVCB) 一律回空答案：
-             - AAAA 回真实记录，客户端会直接走 IPv6 连过去，整条拦截就绕过了
-             - HTTPS(65) / SVCB(64) 记录里带 ipv4hint / ipv6hint，
-               Safari、Chrome 会拿 hint 直接连，同样绕过 DNS 层
-           回「NOERROR + 0 条记录」既不报错、也不给任何可连的地址，
-           客户端只能回退到 A 记录，也就是我们给的黑洞地址。 */
-        let wantsA = (q.qtype == 1 || q.qtype == 255)
+    /// 从 DNS 载荷里读 QNAME，返回（名字，名字结束偏移）
+    static func readQName(_ p: [UInt8], _ start: Int) -> (String, Int)? {
+        var labels: [String] = []
+        var i = start
+        var end = -1
+        var jumps = 0
+        var total = 0
+
+        while i < p.count {
+            let len = Int(p[i])
+            if len == 0 {
+                i += 1
+                if end < 0 { end = i }
+                break
+            }
+            if len & 0xC0 == 0xC0 {
+                guard i + 1 < p.count, jumps < 16 else { return nil }
+                let ptr = ((len & 0x3F) << 8) | Int(p[i + 1])
+                if end < 0 { end = i + 2 }
+                guard ptr >= 0, ptr < p.count else { return nil }
+                i = ptr
+                jumps += 1
+                continue
+            }
+            guard i + 1 + len <= p.count else { return nil }
+            total += len + 1
+            guard total <= 255 else { return nil }
+            labels.append(String(decoding: p[(i + 1)..<(i + 1 + len)], as: UTF8.self))
+            i += 1 + len
+        }
+
+        guard end > 0 else { return nil }
+        return (labels.joined(separator: "."), end)
+    }
+
+    /// 构造黑洞响应（A → 0.0.0.0，TTL 60；非 A → NODATA）
+    static func buildSinkhole(for q: Query) -> Data {
+        let wantsA = (q.qtype == 1)
         var out = Data()
-        var flags: UInt16 = 0x8000            // QR = 1
-        flags |= (q.flags & 0x0100)           // 复制 RD
-        flags |= 0x0400                       // AA
-        flags |= 0x0080                       // RA
-        // RCODE = 0（NOERROR）
+        out.reserveCapacity(q.questionEnd + 16)
 
+        // ID 原样
         out.append(be16(q.id))
-        out.append(be16(flags))
-        out.append(be16(1))                   // QDCOUNT
-        out.append(be16(wantsA ? 1 : 0))       // ANCOUNT
-        out.append(be16(0))                   // NSCOUNT
-        out.append(be16(0))                   // ARCOUNT
+        // QR = 1，保留 RD（与原版同样只保 RD 一位）
+        let rdBit = UInt8((q.flags >> 8) & 0x01)
+        out.append(rdBit | 0x80)
+        // RA = 1，其余 0
+        out.append(0x80)
 
-        // Question 原样拷贝
-        if q.questionEnd <= q.raw.count {
-            out.append(q.raw.subdata(in: 12..<q.questionEnd))
+        out.append(be16(1))                    // QDCOUNT
+        out.append(be16(wantsA ? 1 : 0))       // ANCOUNT
+        out.append(be16(0))                    // NSCOUNT
+        out.append(be16(0))                    // ARCOUNT
+
+        let raw = [UInt8](q.raw)
+        if q.questionEnd > 12, q.questionEnd <= raw.count {
+            out.append(contentsOf: raw[12..<q.questionEnd])
         }
 
         if wantsA {
-            out.append(contentsOf: [0xC0, 0x0C])       // 指向 question 的 NAME
-            out.append(be16(1))                        // TYPE A
-            out.append(be16(1))                        // CLASS IN
-            out.append(be32bytes(30))                  // TTL 30s：后台改规则能较快生效
-            out.append(be16(4))                        // RDLENGTH
-            out.append(be32bytes(ip))                  // 黑洞地址
+            out.append(contentsOf: [0xC0, 0x0C,        // 名字压缩指针 → 偏移 12
+                                    0x00, 0x01,        // TYPE A
+                                    0x00, 0x01,        // CLASS IN
+                                    0x00, 0x00, 0x00, 0x3C,   // TTL 60
+                                    0x00, 0x04,        // RDLENGTH 4
+                                    0x00, 0x00, 0x00, 0x00])   // 0.0.0.0
         }
         return out
     }
-
 
     static func be16(_ v: UInt16) -> Data { Data([UInt8(v >> 8), UInt8(v & 0xFF)]) }
 

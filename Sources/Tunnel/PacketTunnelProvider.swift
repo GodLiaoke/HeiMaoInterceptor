@@ -13,7 +13,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var ruleSet = RuleSet()
     private var dnsIP = AppConfig.dnsProxyIP
     private var clientIP = AppConfig.clientIP
-    private var sinkholeIP = AppConfig.sinkholeIP
     private var startedAt = Date()
     /// 本次隧道的路由方案描述（诊断用）
     private var routeInfo = ""
@@ -113,14 +112,19 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             return
         }
 
-        // 兜底：扩展自己向云端取（同样需要有效卡密）
+        /* 兜底：扩展自己向云端取（同样需要有效卡密）。
+           云端取不到时还有包内自带的规则可用 —— 不能因为服务端抖一下就让防护开不起来。 */
         RuleService.shared.load(pin: pin, code: code, force: false) { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .success(let text):
                 self.begin(rulesText: text, conf: conf, completionHandler: completionHandler)
             case .failure(let err):
-                completionHandler(err)
+                if RuleSet.bundled() != nil {
+                    self.begin(rulesText: "", conf: conf, completionHandler: completionHandler)
+                } else {
+                    completionHandler(err)
+                }
             }
         }
     }
@@ -130,7 +134,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                        completionHandler: @escaping (Error?) -> Void) {
         /* 几万条规则的解析放到后台队列，别堵着扩展的启动线程 */
         WorkQueue.async { [weak self] in
-            let parsed = RuleSet.parse(text: rulesText)
+            /* 包内自带的规则永远作为底座，云端规则并上去：
+               服务端换规则时不会把内置的 IP / 域名段冲掉，没网也能拦住一批。 */
+            var parsed = RuleSet.parse(text: rulesText)
+            if let builtin = RuleSet.bundled() {
+                parsed = parsed.isEmpty ? builtin : parsed.merging(builtin)
+            }
             WorkQueue.main {
                 guard let self = self else { return }
                 self.applyRules(parsed, conf: conf, completionHandler: completionHandler)
@@ -152,7 +161,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         payloadLock.lock(); ruleSet = parsed; payloadLock.unlock()
         dnsIP = (conf["dnsIP"] as? String) ?? AppConfig.dnsProxyIP
         clientIP = (conf["clientIP"] as? String) ?? AppConfig.clientIP
-        sinkholeIP = (conf["sinkholeIP"] as? String) ?? AppConfig.sinkholeIP
         let mtu = (conf["mtu"] as? Int) ?? AppConfig.mtu
 
         lastConf = conf
@@ -174,36 +182,25 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ///   1. 上限放宽到能装下常见规模的精确补集
     ///   2. 精确档装不下时逐级放大聚合粒度，而不是直接跳到 split
     private func makeRoutePlans(_ parsed: RuleSet, conf: [String: Any]) -> [RuleSet.RoutePlan] {
-        let dnsValue  = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F0001
-        let sinkValue = RuleSet.ipToUInt(sinkholeIP) ?? 0x0A6F0009
-        let extra = (conf["routes"] as? [[String: Any]]) ?? []
+        let dnsValue = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F_0001
 
-        var plans: [RuleSet.RoutePlan] = []
-        var lastCount = Int.max
+        /* 1.1.0 的窄口模型（与 ACE 一致）：
+           includedRoutes 只放「规则里的 IP 段 + 假 DNS 的 /32」，
+           不接管 0.0.0.0/0，也不生成补集例外。
+           非规则流量压根不进隧道，所以不存在「补集 2700 条装不下就降级」。 */
+        var plans: [RuleSet.RoutePlan] = [parsed.routePlan(forceInside: [dnsValue])]
 
-        /* 32 = 精确补集；24 / 20 = 把规则段对齐放大到整块，补集随之变少
-           （代价：同一块里没列进规则的地址也会进隧道，引擎不转发，那部分连不上，
-           所以只在精确档装不下时才用，且粒度不放得比 /20 更粗）。 */
-        for bits in [32, 24, 20] {
-            var p = parsed.routePlan(forceInside: [dnsValue, sinkValue], coarsenTo: bits)
-            guard p.hijackAll else { continue }          // 这一档自己放弃了
-            for item in extra {
-                guard let ip = item["ip"] as? String else { continue }
-                p.excluded.removeAll { $0.0 == ip }
-            }
-            if p.routeCount >= lastCount { continue }    // 和上一档一样/更差，没必要试
-            plans.append(p)
-            lastCount = p.routeCount
+        /* 规则段太碎（比如好几千条 /32）时，逐级合并粒度再试：
+           /24 → /20 → /16，宁可多接管一点相邻地址，也别让设置装不下。 */
+        for bits in [24, 20, 16] {
+            plans.append(parsed.routePlan(forceInside: [dnsValue], coarsenTo: bits))
         }
 
-        /* 最后一档：只接管规则段。DNS 大概率不进隧道，域名规则会失效，
-           但至少 IP 规则还能拦、也不会让用户断网。 */
-        var split = RuleSet.RoutePlan()
-        split.degraded = true
-        split.included = RuleSet.cidrs(from: parsed.blockedRanges())
-        split.included.append((dnsIP, 32))
-        split.included.append((sinkholeIP, 32))
-        plans.append(split)
+        /* 最后一档：只留假 DNS。IP 规则失效，但域名拦截照旧能用，也不会让用户断网。 */
+        var dnsOnly = RuleSet.RoutePlan()
+        dnsOnly.degraded = true
+        dnsOnly.included = [(dnsIP, 32)]
+        plans.append(dnsOnly)
         return plans
     }
 
@@ -267,8 +264,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             NEIPv4Route(destinationAddress: $0.0,
                         subnetMask: PacketTunnelProvider.maskString($0.1))
         }
-        /* DNS 必须接管「所有域名」：matchDomains 留空（nil）才表示全部 */
-        s.dnsSettings = NEDNSSettings(servers: [dnsIP])
+        /* DNS 接管「所有域名」：matchDomains 放一个空串就是全部（ACE 的等价写法）。
+           窄路由此刻仍然成立 —— 假 DNS 的 /32 已在 includedRoutes 里。 */
+        let dns = NEDNSSettings(servers: [dnsIP])
+        dns.matchDomains = [""]
+        s.dnsSettings = dns
         s.ipv4Settings = v4
         return s
     }
@@ -276,8 +276,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 起引擎 + 心跳复查
     private func startEngine() {
         let engine = TunnelEngine(flow: packetFlow, rules: ruleSet,
-                                  dnsIP: dnsIP, clientIP: clientIP,
-                                  sinkholeIP: sinkholeIP)
+                                  dnsIP: dnsIP, clientIP: clientIP)
         self.engine = engine
         startedAt = Date()
         phase = "running"
@@ -370,6 +369,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
         payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
         payload["routes"] = routeInfo
+        payload["mode"] = "ace"
+        payload["routeCount"] = ruleSet.report.routes
         payload["phase"] = phase
         /* 注意：这里必须是 dnsServer，不能写 dns。
            写成 dns 会把引擎回上来的 DNS 查询计数覆盖成地址字符串，
@@ -461,7 +462,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let text = String(cmd.dropFirst(6))
             WorkQueue.async { [weak self] in
                 guard let self = self else { return }
-                let newRules = RuleSet.parse(text: text)
+                var newRules = RuleSet.parse(text: text)
+                if let builtin = RuleSet.bundled() {
+                    newRules = newRules.isEmpty ? builtin : newRules.merging(builtin)
+                }
                 WorkQueue.main {
                     /* 热更新失败时保留旧规则，不要因为一次坏包把防护清空 */
                     guard !newRules.isEmpty else {
