@@ -12,13 +12,19 @@ struct HeiMaoApp: App {
                 .environmentObject(model)
                 .preferredColorScheme(.dark)
                 .onChange(of: scenePhase) { phase in
-                    if phase == .active {
+                    switch phase {
+                    case .active:
                         // 回到前台：先向服务端要一次真实授权结论，
                         // 卡密在后台被作废/到期，这一刻界面就会同步变过来
+                        model.applicationWillEnterForeground()
                         model.verifyNow()
                         model.loadAnnouncement()
                         model.pollStats()
                         model.checkUpdate()
+                    case .background:
+                        model.applicationDidEnterBackground()
+                    default:
+                        break
                     }
                 }
         }

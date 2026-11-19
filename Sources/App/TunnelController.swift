@@ -153,8 +153,40 @@ final class TunnelController: ObservableObject {
         }
     }
 
-    func stop() {
-        guard let manager = manager else {
+    /// 自愈：确认系统里这条配置还在、按需连接还开着
+    ///
+    /// 1.2.2：有些环境（伪签名 / 巨魔 / 系统升级后）`saveToPreferences` 会把
+    /// `isOnDemandEnabled` 吞掉但照样回成功。结果就是隧道掉一次之后系统
+    /// 不会再拉回来，用户看到「VPN 自己断了、再也不恢复」。
+    /// 每次回前台顺手核对一遍，被吞掉就补写一次。
+    func healOnDemand(completion: ((Bool) -> Void)? = nil) {
+        NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+            guard let m = TunnelController.pick(managers) else {
+                DispatchQueue.main.async { completion?(false) }
+                return
+            }
+            if m.isOnDemandEnabled {
+                DispatchQueue.main.async { completion?(true) }
+                return
+            }
+            m.isEnabled = true
+            m.isOnDemandEnabled = true
+            m.onDemandRules = [NEOnDemandRuleConnect()]
+            m.saveToPreferences { error in
+                if error == nil {
+                    /* 读回来确认一次：写成功不代表真的落进去了 */
+                    m.loadFromPreferences { _ in
+                        DispatchQueue.main.async { completion?(m.isOnDemandEnabled) }
+                    }
+                    return
+                }
+                DispatchQueue.main.async { completion?(false) }
+            }
+            _ = self
+        }
+    }
+
+    func stop() {        guard let manager = manager else {
             /* 管理器还没读回来：先读出配置再停，避免「点了关闭没反应」 */
             NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
                 guard let self = self else { return }

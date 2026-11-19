@@ -131,6 +131,17 @@ struct LicenseState: Codable {
         }
     }
 
+    /// 只有服务端明确判死才值得当场停隧道
+    ///
+    /// 1.2.2 新增：以前只要 `isUsable()` 为 false 就 stop 隧道 —— 而窗口过期
+    /// （长时间后台、刚切网）也算 false，于是「回到前台网络还没恢复」这一下
+    /// 就把正在跑的防护掐了。现在分开：这里 true 才停，其余只提示、等下一次校验。
+    var isHardInvalid: Bool {
+        if code.isEmpty { return true }
+        if let exp = expireAt, exp <= Date() { return true }
+        return verdict.isHardFailure
+    }
+
     /// 界面统一用的状态文案
     func statusText(now: Date = Date()) -> String {
         if code.isEmpty { return "未激活" }

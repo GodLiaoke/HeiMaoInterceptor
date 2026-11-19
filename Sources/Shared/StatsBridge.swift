@@ -46,7 +46,9 @@ enum StatsBridge {
 
         if let d = UserDefaults(suiteName: groupID) {
             d.set(data, forKey: defaultsKey)
-            d.synchronize()
+            /* 1.2.2：去掉 synchronize()。iOS 8 之后它就不再是「立即落盘」的意思，
+               每次都等一次跨进程同步纯属白烧扩展的 CPU 时间；
+               App 侧的主通道是本机直连，这份只是兜底。 */
         }
         UserDefaults.standard.set(data, forKey: defaultsKey)
     }
@@ -83,10 +85,13 @@ enum StatsBridge {
         return best
     }
 
-    /// 扩展是否还活着（快照 10 秒内写过）
+    /// 扩展是否还活着（快照在有效期内写过）
+    ///
+    /// 1.2.2：落盘从 2 秒降到 10 秒、空闲时 30 秒保温写一次，
+    /// 所以这里的窗口同步放宽到 40 秒，否则会把活着的扩展误判成「上次快照」。
     static func isFresh(_ payload: [String: Any]) -> Bool {
         guard let at = payload["bridgeAt"] as? Int else { return false }
-        return abs(Int(Date().timeIntervalSince1970) - at) <= 10
+        return abs(Int(Date().timeIntervalSince1970) - at) <= 40
     }
 
     /// 快照距今多少秒（给界面显示「扩展多久没写盘了」）

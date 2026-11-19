@@ -65,7 +65,9 @@ final class TunnelEngine {
     private var rules: RuleSet
     private var dnsCache: [String: CacheEntry] = [:]
     private var dnsCacheKeys: [String] = []
-    private let dnsCacheLimit = 1024
+    /// 1.2.2：1024 → 512。扩展在后台是长期驻留的，
+    /// 缓存不是越大越好 —— 撑内存换来的命中率提升很小，被系统回收的代价却很大。
+    private let dnsCacheLimit = 512
 
     /// 同一条连接只回一次 RST，避免重传包把 RST 风暴打回给内核
     private var rstSeen: [UInt64: TimeInterval] = [:]
@@ -242,7 +244,7 @@ final class TunnelEngine {
         } else {
             rstSeen[key] = now
             send = true
-            if rstSeen.count > 4096 {
+            if rstSeen.count > 2048 {
                 rstSeen = rstSeen.filter { now - $0.value < 10 }
             }
         }
@@ -296,14 +298,26 @@ final class TunnelEngine {
 
     private func storeCache(key: String, response: Data) {
         guard response.count >= 12 else { return }
+        let now = Date().timeIntervalSince1970
         stateLock.lock()
         if dnsCache[key] == nil { dnsCacheKeys.append(key) }
-        dnsCache[key] = CacheEntry(response: response,
-                                   expireAt: Date().timeIntervalSince1970 + 90)
+        dnsCache[key] = CacheEntry(response: response, expireAt: now + 90)
         if dnsCacheKeys.count > dnsCacheLimit {
-            let drop = dnsCacheKeys.prefix(256)
-            for k in drop { dnsCache.removeValue(forKey: k) }
-            dnsCacheKeys.removeFirst(min(256, dnsCacheKeys.count))
+            /* 1.2.2：先按过期清，清不干净再按最老的一半丢。
+               以前是直接砍前 256 条，不看有没有过期 —— 长期驻留时等于把
+               还在有效期的热点条目也丢了，前面白缓存。 */
+            let alive = dnsCacheKeys.filter { (dnsCache[$0]?.expireAt ?? 0) > now }
+            if alive.count < dnsCacheKeys.count {
+                dnsCacheKeys = alive
+                let keep = Set(alive)
+                dnsCache = dnsCache.filter { keep.contains($0.key) }
+            }
+            if dnsCacheKeys.count > dnsCacheLimit {
+                let cut = min(dnsCacheKeys.count - dnsCacheLimit / 2, dnsCacheKeys.count)
+                let drop = dnsCacheKeys.prefix(cut)
+                for k in drop { dnsCache.removeValue(forKey: k) }
+                dnsCacheKeys.removeFirst(cut)
+            }
         }
         stateLock.unlock()
     }
@@ -418,39 +432,47 @@ enum DNSUpstream {
         let servers = AppConfig.upstreamDNS
         guard !servers.isEmpty else { return nil }
 
-        let lock = NSLock()
-        var result: Data?
-        let group = DispatchGroup()
+        var fds: [Int32] = []
+        defer { for fd in fds { close(fd) } }
 
-        for server in servers {
-            group.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                defer { group.leave() }
-                if let r = send(payload, to: server, timeout: timeout, wantID: wantID) {
-                    lock.lock()
-                    if result == nil { result = r }
-                    lock.unlock()
-                }
+        for host in servers {
+            if let fd = openAndSend(payload, to: host) { fds.append(fd) }
+        }
+        guard !fds.isEmpty else { return nil }
+
+        var pfds = fds.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
+        let deadline = Date().addingTimeInterval(Double(timeout) / 1000.0)
+
+        while true {
+            let remainMs = Int32(max(0, deadline.timeIntervalSinceNow) * 1000)
+            if remainMs <= 0 { return nil }
+
+            let ready = pfds.withUnsafeMutableBufferPointer { buf -> Int32 in
+                poll(buf.baseAddress, nfds_t(buf.count), remainMs)
+            }
+            if ready <= 0 { return nil }
+
+            for i in pfds.indices where pfds[i].fd >= 0 {
+                guard pfds[i].revents & Int16(POLLIN) != 0 else { continue }
+                if let r = readResponse(fd: pfds[i].fd, wantID: wantID) { return r }
+                /* 这路上游回了脏包 / ID 不匹配：从本轮轮询里摘掉，继续等其它两路。
+                   fd 不在这里关，统一交给 defer —— 避免双重 close。 */
+                pfds[i].fd = -1
             }
         }
-
-        _ = group.wait(timeout: .now() + .milliseconds(Int(timeout) + 150))
-        lock.lock(); let out = result; lock.unlock()
-        return out
     }
 
-    private static func send(_ payload: Data, to host: String,
-                             timeout: Int32, wantID: UInt16) -> Data? {
+    /// 建 socket → connect 上游 → 发出去。失败返回 nil，调用方跳过这一路。
+    private static func openAndSend(_ payload: Data, to host: String) -> Int32? {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return nil }
-        defer { close(fd) }
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(53).bigEndian
         var ip = in_addr()
-        guard inet_pton(AF_INET, host, &ip) == 1 else { return nil }
+        guard inet_pton(AF_INET, host, &ip) == 1 else { close(fd); return nil }
         addr.sin_addr = ip
 
         let connected = withUnsafePointer(to: &addr) { ptr -> Int32 in
@@ -458,17 +480,17 @@ enum DNSUpstream {
                 connect(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        guard connected == 0 else { return nil }
+        guard connected == 0 else { close(fd); return nil }
 
         let sent = payload.withUnsafeBytes { (buf: UnsafeRawBufferPointer) -> Int in
             guard let base = buf.baseAddress else { return -1 }
             return Int(Darwin.send(fd, base, buf.count, 0))
         }
-        guard sent > 0 else { return nil }
+        guard sent > 0 else { close(fd); return nil }
+        return fd
+    }
 
-        var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        guard poll(&pfd, 1, timeout) > 0 else { return nil }
-
+    private static func readResponse(fd: Int32, wantID: UInt16) -> Data? {
         var buf = [UInt8](repeating: 0, count: 4096)
         let n = buf.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) -> Int in
             guard let base = raw.baseAddress else { return -1 }
@@ -479,7 +501,6 @@ enum DNSUpstream {
         let gotID = UInt16(buf[0]) << 8 | UInt16(buf[1])
         guard gotID == wantID else { return nil }
         guard buf[2] & 0x80 != 0 else { return nil }
-
         return Data(buf[0..<n])
     }
 }

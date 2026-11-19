@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import UIKit
 
 /// 界面状态中枢
 ///
@@ -77,6 +78,21 @@ final class AppModel: ObservableObject {
     private var switching = false
     /// 心跳连续失败次数：到阈值就按「链路断了」处理，卸载规则并断开
     private var renewFailures = 0
+    /// 是否在前台。App 进后台后 iOS 会把进程挂起，主线程 Timer 全部停摆，
+    /// 这时候再发心跳没有意义，只会让「心跳失败次数」虚涨。
+    private var foreground = true
+    /// 进后台时申请的短暂额度：用来把手上这一次心跳 / 状态落盘做完
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    /// 续期守护：曾经开过防护、现在断了，就自己拉回来
+    private var lastAutoStart = Date.distantPast
+    private var autoStartCount = 0
+
+    /// 用户上一次的意图：开 or 关。自动重连只在这个为 true 时做，
+    /// 用户自己点了关闭就不会被系统「热心」地重新拉起来。
+    private var wantsProtection: Bool {
+        get { UserDefaults.standard.bool(forKey: "hm.wants.protection") }
+        set { UserDefaults.standard.set(newValue, forKey: "hm.wants.protection") }
+    }
 
     /// 设置页里的刷新动作
     enum QuickAction {
@@ -105,14 +121,24 @@ final class AppModel: ObservableObject {
                 guard let self = self else { return }
                 self.refreshLocal()
                 self.pollStats()
+                self.protectionGuard()
             }
 
-        /* 续期：每 30 秒检查一次，够 60 秒就推一次窗口 */
+        /* 续期：每 30 秒检查一次，够 90 秒就推一次窗口 */
         renewTimer = Timer.publish(every: 30, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self = self else { return }
-                guard self.authorized else { return }
+                /* 后台不发心跳：进程随时会被冻住，发的这次也可能排在队列里
+                   等唤醒后才执行，反而把 lastRenew 推后、让下一次心跳更晚。
+                   后台续期交给隧道扩展（它不会被挂起）。 */
+                guard self.foreground else { return }
+                /* 1.2.2：这里以前是 guard self.authorized。
+                   窗口一过期 authorized 就变 false，于是心跳彻底停了 ——
+                   再怎么等也恢复不了，只能手动去点「刷新状态」。
+                   现在只要不是硬失效就继续续，网络回来自然能续上。 */
+                guard !ConfigStore.shared.license.isHardInvalid else { return }
+                guard self.tunnel.isConnected else { return }
                 guard Date().timeIntervalSince(self.lastRenew) >= AppConfig.heartbeatInterval else { return }
                 self.refreshLicense(silent: true)
             }
@@ -121,6 +147,94 @@ final class AppModel: ObservableObject {
         verifyNow()
         /* 规则不在启动时拉：只在开启防护的那一刻下发 */
         checkUpdate()
+    }
+
+    // MARK: - 前后台
+
+    /// 进后台：只把最后一笔状态落盘，然后停止一切定时任务（反正会被冻结）
+    func applicationDidEnterBackground() {
+        foreground = false
+        /* 申请一小段后台时间，把「刚收发的统计」「当前授权」落稳，
+           顺便把下一次心跳提前发掉 —— 这样后台闲置很长时间后回来，
+           服务端窗口也还没过期，不用等一次完整校验才恢复。 */
+        beginBackgroundWindow()
+        if authorized && tunnel.isConnected {
+            refreshLicense(silent: true)
+        }
+    }
+
+    /// 回前台：立刻补一次校验，并把自动重连的节流窗口复位
+    func applicationWillEnterForeground() {
+        foreground = true
+        endBackgroundWindow()
+        lastAutoStart = .distantPast
+        autoStartCount = 0
+        /* 顺手核对按需连接还在不在：被系统吞掉的话，隧道掉一次就再也拉不回来 */
+        if wantsProtection { tunnel.healOnDemand() }
+        pollStats()
+        protectionGuard(force: true)
+    }
+
+    private func beginBackgroundWindow() {
+        endBackgroundWindow()
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "hm.beat") { [weak self] in
+            self?.endBackgroundWindow()
+        }
+        /* 最多 25 秒，别占着系统额度 */
+        DispatchQueue.main.asyncAfter(deadline: .now() + 25) { [weak self] in
+            self?.endBackgroundWindow()
+        }
+    }
+
+    private func endBackgroundWindow() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
+    }
+
+    // MARK: - 防护守护
+
+    /// 心跳自己会断，隧道不该跟着断。
+    ///
+    /// 这个守护只做一件事：用户明确开过防护、授权还有效、但隧道掉了
+    /// （切网、锁屏、系统回收扩展之后没被 onDemand 拉回来），就自己拉回来。
+    /// 每次最少间隔 45 秒、连续 8 次失败就停手，避免在没救的情况下反复连断。
+    private func protectionGuard(force: Bool = false) {
+        guard wantsProtection else { return }
+        /* 只按硬失效拦：窗口过期（后台久了 / 刚切网）不该阻止把隧道拉回来 */
+        guard !ConfigStore.shared.license.isHardInvalid else { return }
+        guard tunnel.status == .disconnected || tunnel.status == .invalid else { return }
+        guard !switching else { return }
+        guard autoStartCount < 8 else { return }
+        guard force || Date().timeIntervalSince(lastAutoStart) >= 45 else { return }
+
+        lastAutoStart = Date()
+        autoStartCount += 1
+
+        if RuleService.shared.isLoaded {
+            launchTunnel(auto: true)
+            return
+        }
+        /* 规则不在内存里（App 被系统重开过、刚装完）：先拉一次再起隧道。
+           直接 start() 会被「规则还没加载好」挡回来，表现就是守护一直试一直失败。 */
+        loadRules(force: false, requireTunnel: false) { [weak self] ok in
+            guard let self = self, ok else { return }
+            self.launchTunnel(auto: true)
+        }
+    }
+
+    private func launchTunnel(auto: Bool = false) {
+        tunnel.start { [weak self] result in
+            guard let self = self else { return }
+            if case .success = result {
+                let first = (self.autoStartCount <= 1)
+                self.autoStartCount = 0
+                /* 只在第一次自动恢复时提示，避免反复连断时刷屏 */
+                if auto && first {
+                    self.publishResult("VPN 被系统中断，已自动恢复防护")
+                }
+            }
+        }
     }
 
     var pin: String { ConfigStore.shared.pin }
@@ -279,7 +393,7 @@ final class AppModel: ObservableObject {
                     ok = lic.isUsable()
                     alert = ok ? nil : lic.blockReason
                     snapshot = lic
-                    if !ok { RuleService.shared.clear() }
+                    if lic.isHardInvalid { RuleService.shared.clear() }
 
                 case .failure(let err):
                     /* 网络问题不改判定，交给窗口 + 宽限兜住 */
@@ -299,10 +413,14 @@ final class AppModel: ObservableObject {
                         self.refreshLocal()
                     }
                     self.authAlert = alert
-                    if !ok {
+                    /* 1.2.2：只有服务端明确判死（作废/到期/封禁/强下线）才断隧道。
+                       「窗口过期」「刚联网还没校验上」以前也走这里，于是一回到
+                       前台、网络还没恢复的那一下，正在跑的防护就被掐了 ——
+                       用户看到的正是「挂后台一会儿就断」。 */
+                    if self.license.isHardInvalid {
                         self.refreshRules()
                         if self.tunnel.isConnected { self.tunnel.stop() }
-                    } else if ok && self.tunnel.isConnected && !RuleService.shared.isLoaded {
+                    } else if self.tunnel.isConnected && !RuleService.shared.isLoaded {
                         /* 只有隧道在跑才需要规则；没开防护就不下发 */
                         self.loadRules(force: false, requireTunnel: false)
                     }
@@ -368,17 +486,26 @@ final class AppModel: ObservableObject {
                     ConfigStore.shared.applySession(st, pin: pin, code: code)
                     let lic = ConfigStore.shared.license
                     let ok = lic.isUsable()
-                    if !ok { RuleService.shared.clear() }
+                    let dead = lic.isHardInvalid
+                    if dead { RuleService.shared.clear() }
 
                     WorkQueue.main {
                         if !silent { self.busy = false }
                         self.license = lic
                         self.authorized = ok
                         self.refreshRules()
-                        if !ok {
+                        /* 1.2.2：心跳回来的结论也分软硬。
+                           只有作废 / 到期 / 封禁 / 强下线才停隧道；
+                           窗口过期（后台太久没续上）只提示，防护继续跑，
+                           下一次心跳成功就自动恢复正常。 */
+                        if dead {
                             self.authAlert = lic.blockReason
                             if self.tunnel.isConnected { self.tunnel.stop() }
-                            if !silent { self.publishResult("授权已失效：\(lic.blockReason)") }
+                            if !silent { self.publishResult("授权已失效：\(lic.blockReason ?? "")") }
+                            return
+                        }
+                        if !ok {
+                            self.authAlert = nil
                             return
                         }
                         self.renewFailures = 0
@@ -498,6 +625,8 @@ final class AppModel: ObservableObject {
 
         if tunnel.isConnected {
             /* 关防护 = 立刻把规则从内存里卸掉，不留在设备上 */
+            wantsProtection = false
+            autoStartCount = 0
             tunnel.stop()
             RuleService.shared.clear()
             refreshRules()
@@ -544,6 +673,8 @@ final class AppModel: ObservableObject {
                         self.busy = false
                         switch result {
                         case .success:
+                            self.wantsProtection = true
+                            self.autoStartCount = 0
                             if let notice = ConfigStore.shared.cloudNotice, !notice.isEmpty {
                                 self.toast = notice
                             }

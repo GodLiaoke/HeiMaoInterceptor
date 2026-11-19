@@ -1,5 +1,6 @@
 import Foundation
 import NetworkExtension
+import Network
 
 /// VPN 隧道扩展入口
 ///
@@ -25,6 +26,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var pin = ""
     private var code = ""
     private var verifyTimer: DispatchSourceTimer?
+    /// 保活心跳：App 被系统挂起后由这里继续续在线窗口（1.2.2）
+    private var keepAliveTimer: DispatchSourceTimer?
+    /// 网络路径监听：WiFi ↔ 蜂窝 切换后隧道设置要重新应用一次（1.2.2）
+    private var pathMonitor: NWPathMonitor?
+    private let pathQueue = DispatchQueue(label: "hm.path")
+    private var lastPathSatisfied = true
+    private var lastPathCellular = false
+    private var lastStatsWriteAt = Date.distantPast
+    private var lastStatsFingerprint = ""
+    /// 最后一次设置成功路由方案：切网 / 唤醒后原样重放，不重算
+    private var activePlan: RuleSet.RoutePlan?
     /// 统计落盘定时器：sendProviderMessage 丢回包时 App 靠这份兜底
     private var statsTimer: DispatchSourceTimer?
     /// 本机直连的统计服务：不走沙箱共享目录、不走消息回调，环境挡不住
@@ -231,6 +243,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if error == nil {
                 self.routeInfo = plan.description
                 self.routeHijackAll = plan.hijackAll
+                self.activePlan = plan
                 self.startEngine()
                 completion(nil)
                 return
@@ -259,6 +272,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             if error == nil {
                 self.routeInfo = plan.description
                 self.routeHijackAll = plan.hijackAll
+                self.activePlan = plan
                 StatsBridge.write(self.statsPayload())
                 return
             }
@@ -298,7 +312,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         startedAt = Date()
         phase = "running"
         engine.start()
-        startVerifyLoop()
+        startKeepAliveLoop()
+        startPathMonitor()
         startStatsPublisher()
 
         /* 保险：授权校验放到隧道跑起来之后，别挡着启动 */
@@ -312,17 +327,59 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
            用户看到的就是 VPN 莫名其妙掉线。路由有没有生效改由诊断行判断，不再自动断网。 */
     }
 
-    /// 运行中复查：卡密中途被作废 / 到期，隧道主动断开
-    private func startVerifyLoop() {
-        verifyTimer?.cancel()
-        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "hm.verify"))
-        t.schedule(deadline: .now() + AppConfig.tunnelVerifyInterval,
-                   repeating: AppConfig.tunnelVerifyInterval)
+    /// 运行中保活 + 复查
+    ///
+    /// 1.2.2 把「心跳」从 App 搬到扩展里：
+    /// App 一进后台就被 iOS 冻结，主线程定时器全部停摆 —— 在线窗口必然断档，
+    /// 用户回来时看到的就是「掉线了 / 要重新校验」。扩展属于系统托管的网络组件，
+    /// 后台照常运行，所以由它每 4 分钟续一次在线窗口，App 在不在都一样。
+    private func startKeepAliveLoop() {
+        keepAliveTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "hm.keepalive"))
+        /* 起来 20 秒先打一次（把窗口顶到满），之后按间隔续 */
+        t.schedule(deadline: .now() + 20,
+                   repeating: AppConfig.tunnelBeatInterval)
         t.setEventHandler { [weak self] in
-            self?.verifyOnce()
+            self?.keepAliveOnce()
         }
         t.resume()
-        verifyTimer = t
+        keepAliveTimer = t
+    }
+
+    /// 一次保活：先续窗口（轻），按间隔再做一次真实校验（重）
+    private var lastDeepCheck = Date.distantPast
+
+    private func keepAliveOnce() {
+        guard !pin.isEmpty else { return }
+
+        let needDeep = Date().timeIntervalSince(lastDeepCheck) >= AppConfig.tunnelVerifyInterval
+        if needDeep {
+            lastDeepCheck = Date()
+            verifyOnce()
+            return
+        }
+
+        /* 续窗口：不带 itg / 功能探针，只要一次 authorized 结论，服务端开销最小 */
+        SecureChannel.post(Obfs.s(21), params: ["code": code, "ver": AppConfig.appVersion],
+                           pin: pin) { [weak self] result in
+            guard let self = self else { return }
+            guard case .success(let obj) = result else {
+                /* 网络不通：什么都不做。防护已经在跑，等下一次心跳。 */
+                return
+            }
+            let authorized = (obj["authorized"] as? Bool) ?? true
+            if !authorized {
+                let reason = (obj["reason"] as? String) ?? "unknown"
+                if PacketTunnelProvider.hardReasons.contains(reason) {
+                    self.dropProtection(reason: reason)
+                }
+            }
+            self.verifyFails = 0
+            /* 只在引擎还在跑时刷新阶段，别把 stopped 又刷回 running */
+            if self.engine != nil && self.phase.hasPrefix("running") == true {
+                self.phase = "running"
+            }
+        }
     }
 
     private func verifyOnce() {
@@ -331,9 +388,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let self = self else { return }
 
             guard case .success(let obj) = result else {
-                /* 1.1.1：网络失败不再断隧道。
-                   以前连续两次（10 分钟）连不上服务端就 cancelTunnelWithError，
-                   手机锁屏、切网、地铁里信号差都会触发 —— 用户体感就是「VPN 老是断开」。
+                /* 网络失败不断隧道：锁屏、切网、地铁里信号差都会走到这里。
                    防护是否继续由本地授权状态决定，服务端连不上只是复核延后。 */
                 self.verifyFails += 1
                 return
@@ -350,6 +405,52 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    // MARK: - 网络路径变化（1.2.2）
+
+    /// WiFi ↔ 蜂窝 切换、飞行模式开关之后，系统会重建物理接口。
+    /// 隧道设置里的 DNS / 路由是绑在启动时那套网络上的，不重放一次的话
+    /// 表现就是「VPN 显示已连接，但一个域名都拦不住、网还特别慢」，
+    /// 用户只能手动关掉再开。这里在路径变化后原样重放一次设置。
+    private func startPathMonitor() {
+        guard pathMonitor == nil else { return }
+        let m = NWPathMonitor()
+        m.pathUpdateHandler = { [weak self] path in
+            guard let self = self else { return }
+            let satisfied = (path.status == .satisfied)
+            let cellular = path.usesInterfaceType(.cellular)
+            /* 只在「断网→有网」或「蜂窝 ↔ WiFi 换接口」时动作。
+               以前写成「只要在蜂窝下就重放」，网络质量抖一下就会重设隧道设置，
+               用户体感是反复卡顿。 */
+            let changed = (satisfied != self.lastPathSatisfied) || (cellular != self.lastPathCellular)
+            self.lastPathSatisfied = satisfied
+            self.lastPathCellular = cellular
+            guard satisfied, changed else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                self?.reapplyTunnelSettings()
+            }
+        }
+        m.start(queue: pathQueue)
+        pathMonitor = m
+    }
+
+    /// 切网后重放隧道设置：先用最后成功的方案，没有再按当前规则重算
+    private func reapplyTunnelSettings() {
+        guard phase == "running" else { return }
+        if let plan = activePlan {
+            setTunnelNetworkSettings(buildSettings(plan, mtu: lastMTU)) { [weak self] error in
+                guard let self = self else { return }
+                if error == nil {
+                    self.engine?.resumeReading()
+                } else {
+                    self.rebuildRoutes()
+                }
+            }
+            return
+        }
+        rebuildRoutes()
+    }
+
+
     /// 命中这些原因才真正断开隧道；其余（窗口过期 / 未知）只记录
     static let hardReasons: Set<String> = [
         "card_revoked", "card_expired", "card_not_found", "no_card"
@@ -364,6 +465,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         StatsBridge.write(statsPayload())
         statsTimer?.cancel()
         statsTimer = nil
+        keepAliveTimer?.cancel()
+        keepAliveTimer = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
         stopStatsServer()
         payloadLock.lock(); ruleSet = RuleSet(); payloadLock.unlock()
         engine?.stop()
@@ -405,17 +510,43 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         return payload
     }
 
-    /// 每 2 秒把统计落一份盘，App 侧 sendProviderMessage 丢回包时读这份
+    /// 每 10 秒把统计落一份盘（App 侧拿不到实时回包时读这份）
+    ///
+    /// 1.2.2：原来是每 2 秒无条件写四个路径 + UserDefaults.synchronize()。
+    /// 扩展在后台是长期驻留的，一天累计几万次原子写盘 —— 既费电，
+    /// 又会让扩展的 CPU / I/O 预算被系统盯上，表现就是「挂久了被回收」。
+    /// 现在有变化才写，完全空闲时 30 秒才保温写一次。
     private func startStatsPublisher() {
         statsTimer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "hm.stats"))
-        t.schedule(deadline: .now() + 1, repeating: 2)
+        t.schedule(deadline: .now() + 1, repeating: AppConfig.statsPublishInterval)
         t.setEventHandler { [weak self] in
-            guard let self = self else { return }
-            StatsBridge.write(self.statsPayload())
+            self?.publishStats()
         }
         t.resume()
         statsTimer = t
+    }
+
+    private func publishStats(force: Bool = false) {
+        let payload = statsPayload()
+        let fp = PacketTunnelProvider.fingerprint(payload)
+        let idle = Date().timeIntervalSince(lastStatsWriteAt)
+        if !force && fp == lastStatsFingerprint && idle < 30 { return }
+        lastStatsFingerprint = fp
+        lastStatsWriteAt = Date()
+        StatsBridge.write(payload)
+    }
+
+    /// 只把会变的业务数字拼成指纹，不含 uptime / bridgeAt（那两个每次都变）
+    private static func fingerprint(_ p: [String: Any]) -> String {
+        func n(_ k: String) -> Int {
+            if let v = p[k] as? Int { return v }
+            if let v = p[k] as? NSNumber { return v.intValue }
+            return 0
+        }
+        return "\(n("blocked"))|\(n("domains"))|\(n("tcp"))|\(n("udp"))|"
+             + "\(n("dns"))|\(n("tunnel"))|\(n("passed"))|\(n("stray"))|"
+             + "\(p["phase"] as? String ?? "")|\(p["routes"] as? String ?? "")"
     }
 
     /// 起本机直连统计服务（只有回环能连）：
@@ -440,14 +571,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 唤醒后不重新拉一轮，表现就是「VPN 显示已连接，但一个包都不读了」——
     /// 用户以为隧道断了，其实是引擎停摆，拦截全失效。
     override func sleep(completionHandler: @escaping () -> Void) {
-        StatsBridge.write(statsPayload())
+        /* 睡前把最后一份状态落稳（这时候 App 多半也被挂起了，醒来要读这份） */
+        publishStats(force: true)
         completionHandler()
     }
 
     override func wake() {
-        StatsBridge.write(statsPayload())
-        guard phase == "running", let engine = engine else { return }
+        publishStats(force: true)
+
+        guard let engine = engine else {
+            /* 引擎已经不在了（休眠期间被回收过）：按最后方案重新拉起来 */
+            if phase == "running" { startEngine() }
+            return
+        }
+        /* 1.2.2：不再用 phase == "running" 卡这一下。
+           唤醒时 phase 可能是 starting（系统刚重起扩展），卡住就等于
+           「VPN 显示已连接、一个包都不读」，用户以为断了。 */
         engine.resumeReading()
+        /* 醒来时物理网卡可能已经换了一个（锁屏期间切了 WiFi / 蜂窝），
+           隧道设置原样重放一次，DNS 才会重新走隧道 */
+        reapplyTunnelSettings()
     }
 
     override func stopTunnel(with reason: NEProviderStopReason,
@@ -461,6 +604,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         stopStatsServer()
         verifyTimer?.cancel()
         verifyTimer = nil
+        keepAliveTimer?.cancel()
+        keepAliveTimer = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
         engine?.stop()
         engine = nil
         /* 关闭即卸载：不在扩展进程里留任何规则副本 */

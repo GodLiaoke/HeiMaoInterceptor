@@ -7,8 +7,8 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
-    static let appVersion     = "1.2.1"
-    static let buildNumber    = 119          // 1.2.1 build119（修 v4 响应密钥派生 / 设备时间不准自动校正重发）
+    static let appVersion     = "1.2.2"
+    static let buildNumber    = 120          // 1.2.2 build120（后台常驻：心跳下沉扩展 / 切网自愈 / 不误断）
     static let apiBase        = Obfs.join(0, 1)
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
@@ -40,13 +40,28 @@ enum AppConfig {
 
     /// 授权宽限期：在线校验窗口过期后，本地再容忍这么久（断网/抖动不误判）
     /// 注意：卡密被作废 / 到期时不走宽限，立即失效
-    static let offlineGrace: TimeInterval = 10 * 60
+    ///
+    /// 1.2.2：10 分钟 → 30 分钟。App 进后台会被 iOS 挂起，心跳必然断档；
+    /// 以前 20 分钟后一回到前台就可能被判「窗口过期」直接停隧道 —— 这是
+    /// 「挂后台就断」的主因之一。防护本身已经在跑，宽限期拉长不影响安全：
+    /// 卡密被作废 / 到期走的是服务端明确结论，不经过宽限。
+    static let offlineGrace: TimeInterval = 30 * 60
 
-    /// 心跳间隔：每 60 秒推一次在线校验窗口（服务端窗口 600 秒）
-    static let heartbeatInterval: TimeInterval = 60
+    /// 心跳间隔：前台每 90 秒推一次在线校验窗口（服务端窗口 600 秒）
+    /// 1.2.2：60 → 90 秒。窗口 600 秒，90 秒一次有 6 次余量，省一半唤醒。
+    static let heartbeatInterval: TimeInterval = 90
 
-    /// 强校验间隔：隧道运行中每 5 分钟向服务端核对一次真实授权
-    static let tunnelVerifyInterval: TimeInterval = 5 * 60
+    /// 扩展内心跳：App 在后台被挂起之后，由隧道扩展继续续在线窗口。
+    /// 这是「后台常驻」的关键 —— App 进程会被系统冻结，扩展不会。
+    /// 服务端窗口 600 秒，300 秒一次留两次余量，一次失败也来得及补。
+    static let tunnelBeatInterval: TimeInterval = 5 * 60
+
+    /// 扩展内强校验：真正问一次「卡密还能不能用」（比心跳重，间隔拉长）
+    static let tunnelVerifyInterval: TimeInterval = 15 * 60
+
+    /// 统计落盘间隔（App 读不到消息回包时的兜底快照）
+    /// 1.2.2：2 秒 → 10 秒。后台每 2 秒写一次盘，累计 I/O 会拖垮扩展。
+    static let statsPublishInterval: TimeInterval = 10
 
     /// 云端规则包密钥派生参数（必须与服务端 RulesService 一致）
     static let rulesSalt = Obfs.join(6, 7)
