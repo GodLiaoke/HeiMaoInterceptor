@@ -72,6 +72,20 @@
   不是 SwiftUI Grid；`presentation.wrappedValue.dismiss()` 是 iOS 14 的老 API）
 - 运行时新增的 `NWPathMonitor` / `UIBackgroundTask` 都是 iOS 12/4 起可用
 
+### 1.2.2 上线记录（2026-11-20 00:55 北京时间）
+
+- 包：`HeiMao_Pro_v1.2.2_build120_signed.ipa`（1,288,823 B）、`_unsigned.ipa`（1,270,167 B）
+- sha256：签名 `dd97f5b11d86b70c19a6c93dfaf98d94c0eaf7865a1995c124fd65e107dd6763`
+  / 未签 `a259d95ff0dc637fa124a2729866f6a79372344f9dc3997fdfc7f6fae268f53e`
+- 核对：双端 1.2.2 / 120、MinimumOSVersion 14.0、双端 755、双端签名段、
+  双端含 networkextension + platform-application 权限段、包内无 rules.txt、OBF_OK / SYMBOL_OK
+- 线上：`https://ios.ouovo.cc` 已指向这版，两个地址实测 206（可下载），页面显示 iOS 14–27
+- 版本表：1.2.2 / 120，force_update = 1；1.2.1 记录置为 inactive
+- 公告已换成 1.2.2
+- 服务端：在线判定窗口 150 → 300 秒（`CardService::stats` 两处、`SessionService::online` 默认值），
+  配合扩展 150 秒心跳；备份在 `/root/bak-beat-20261119_161712/`
+- 下载页文案：iOS 15 → iOS 14（备份 `/root/bak-index-*.php`）
+
 ### 待验证（需真机）
 
 - 挂后台 2 小时以上不断、回前台「心跳」秒数新鲜
