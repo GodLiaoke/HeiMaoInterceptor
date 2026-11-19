@@ -332,7 +332,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 1.2.2 把「心跳」从 App 搬到扩展里：
     /// App 一进后台就被 iOS 冻结，主线程定时器全部停摆 —— 在线窗口必然断档，
     /// 用户回来时看到的就是「掉线了 / 要重新校验」。扩展属于系统托管的网络组件，
-    /// 后台照常运行，所以由它每 4 分钟续一次在线窗口，App 在不在都一样。
+    /// 后台照常运行，所以由它每 150 秒续一次在线窗口（服务端 300 秒判在线），
+    App 在不在都一样。
     private func startKeepAliveLoop() {
         keepAliveTimer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "hm.keepalive"))
@@ -368,8 +369,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             let authorized = (obj["authorized"] as? Bool) ?? true
-            /* 服务端 beat 会一并回「是否被强制下线」，这里当场处理，
-               不必等到 15 分钟一次的重校验 —— 后台点下线要尽快生效。 */
+            /* renew 被管理员强制下线时回的是 ok:false + error:kicked，
+               不会带 authorized 字段 —— 这里补一层，后台点下线要当场生效。 */
+            if (obj["ok"] as? Bool) == false {
+                let err = (obj["error"] as? String) ?? ""
+                if PacketTunnelProvider.hardReasons.contains(err) {
+                    self.dropProtection(reason: err)
+                    return
+                }
+            }
             let kicked = (obj["kicked"] as? Bool) ?? false
             if kicked {
                 self.dropProtection(reason: "kicked")
@@ -461,7 +469,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     /// 命中这些原因才真正断开隧道；其余（窗口过期 / 未知）只记录
     static let hardReasons: Set<String> = [
-        "card_revoked", "card_expired", "card_not_found", "no_card"
+        "card_revoked", "card_expired", "card_not_found", "no_card", "kicked"
     ]
 
     /// 卸载规则 + 停隧道：内存里的规则先清掉再断，断完这一份就不存在了
