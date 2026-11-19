@@ -71,6 +71,7 @@ enum SecureChannel {
         case signature
         case crypto
         case badPayload
+        case v4Unavailable
 
         var errorDescription: String? {
             switch self {
@@ -79,6 +80,7 @@ enum SecureChannel {
             case .signature:      return "响应校验失败，请稍后重试"
             case .crypto:         return "数据解密失败，请稍后重试"
             case .badPayload:     return "服务端返回异常"
+            case .v4Unavailable:  return "服务端返回异常"
             }
         }
     }
@@ -94,6 +96,9 @@ enum SecureChannel {
             return
         }
 
+        /* CRC 链第 0 环：走通道之前先自检，链断了 code 会变成 crc 并上报 */
+        _ = Integrity.shared.arm(0)
+
         // 路径必须和签名串逐字一致（服务端会把首尾斜杠 trim 掉再验签）
         let route = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard !route.isEmpty else {
@@ -106,8 +111,154 @@ enum SecureChannel {
             attemptPlain(route: route, url: url, params: params, pin: pin, completion: completion)
             return
         }
-        attempt(route: route, url: url, params: params, pin: pin,
-                candidate: 0, completion: completion)
+
+        /* 1.2.0：默认走 v4（请求响应都是裸二进制，抓包看不出任何结构）。
+           服务端不认 v4（没升级 / 回滚）时自动退回 v3，用户完全无感。 */
+        attemptV4(route: route, url: url, params: params, pin: pin) { result in
+            switch result {
+            case .success(let obj):
+                completion(.success(obj))
+            case .failure(let err):
+                if let f = err as? Failure, case .v4Unavailable = f {
+                    attempt(route: route, url: url, params: params, pin: pin,
+                            candidate: 0, completion: completion)
+                } else {
+                    completion(.failure(err))
+                }
+            }
+        }
+    }
+
+    // MARK: - v4 裸密文通道
+
+    /// 与 PHP 侧 canonical() 逐字一致：key 字典序，k=v 用 0x1F 连接
+    static func canonical(_ params: [String: Any]) -> String {
+        let keys = params.keys.sorted()
+        let pairs: [String] = keys.map { k in
+            let v = params[k]
+            let text: String
+            if let b = v as? Bool {
+                text = b ? "1" : "0"
+            } else if let str = v as? String {
+                text = str
+            } else if let i = v as? Int {
+                text = String(i)
+            } else if let d = v as? Double {
+                text = (d == d.rounded()) ? String(Int(d)) : String(d)
+            } else if let n = v as? NSNumber {
+                text = n.stringValue
+            } else {
+                text = "\(v ?? "")"
+            }
+            return k + "=" + text
+        }
+        return pairs.joined(separator: "\u{1F}")
+    }
+
+    static func hmacSha512Hex(_ text: String) -> String {
+        let mac = HMAC<SHA512>.authenticationCode(for: Data(text.utf8), using: master)
+        return mac.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func sealBlob(_ plain: String, key: SymmetricKey, iv: Data, aad: Data) -> Data? {
+        guard let nonce = try? AES.GCM.Nonce(data: iv),
+              let box = try? AES.GCM.seal(Data(plain.utf8), using: key,
+                                          nonce: nonce, authenticating: aad) else {
+            return nil
+        }
+        var out = iv
+        out.append(box.ciphertext)
+        out.append(box.tag)
+        return out
+    }
+
+    private static func openBlob(_ raw: Data, key: SymmetricKey, aad: Data) -> String? {
+        guard raw.count >= 29 else { return nil }
+        let iv = raw.prefix(12)
+        let tag = raw.suffix(16)
+        let ct = raw.dropFirst(12).dropLast(16)
+        guard let nonce = try? AES.GCM.Nonce(data: Data(iv)),
+              let box = try? AES.GCM.SealedBox(nonce: nonce,
+                                               ciphertext: Data(ct),
+                                               tag: Data(tag)),
+              let out = try? AES.GCM.open(box, using: key, authenticating: aad) else {
+            return nil
+        }
+        return String(data: out, encoding: .utf8)
+    }
+
+    /// v4：请求体与响应体都是 iv(12)||密文||tag(16)，没有任何 JSON 结构
+    private static func attemptV4(route: String,
+                                  url: URL,
+                                  params: [String: Any],
+                                  pin: String,
+                                  completion: @escaping (Result<[String: Any], Error>) -> Void) {
+
+        var body = params
+        body["pin"] = pin
+        body["dev"] = DeviceIdentity.shared.dev
+        body["dvi"] = DeviceIdentity.shared.source
+
+        let ts = Int(Date().timeIntervalSince1970)
+        var iv = Data(count: 12)
+        let rc = iv.withUnsafeMutableBytes { buf -> Int32 in
+            guard let base = buf.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, 12, base)
+        }
+        guard rc == errSecSuccess else { completion(.failure(Failure.crypto)); return }
+
+        let ivHex = iv.hexString
+        let canon = canonical(body)
+        let msg = AppConfig.v4SigTag + route + "|" + pin + "|" + String(ts) + "|"
+                + ivHex + "|" + sha256Hex(canon)
+        let sig = hmacSha512Hex(msg)
+
+        let envelope: [String: Any] = [
+            "r": route, "p": pin, "t": ts, "n": ivHex, "s": sig, "d": body,
+        ]
+        guard let plainData = try? JSONSerialization.data(withJSONObject: envelope, options: []),
+              let plain = String(data: plainData, encoding: .utf8) else {
+            completion(.failure(Failure.badPayload)); return
+        }
+
+        let key = HKDF<SHA512>.deriveKey(inputKeyMaterial: SymmetricKey(data: masterData),
+                                         salt: iv,
+                                         info: Data(AppConfig.v4InfoReq.utf8),
+                                         outputByteCount: 32)
+        let aad = Data((AppConfig.v4AadReq + route + "|" + ivHex).utf8)
+        guard let blob = sealBlob(plain, key: key, iv: iv, aad: aad) else {
+            completion(.failure(Failure.crypto)); return
+        }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        req.httpBody = blob
+
+        session.dataTask(with: req) { data, resp, err in
+            if err != nil {
+                completion(.failure(Failure.network)); return
+            }
+            guard let data = data, data.count >= 29 else {
+                completion(.failure(Failure.v4Unavailable)); return
+            }
+            /* 服务端不认 v4 时会回一段 JSON（明文错误），据此回退 v3 */
+            if data.first == 0x7B {
+                completion(.failure(Failure.v4Unavailable)); return
+            }
+            let resIv = data.prefix(12)
+            let resKey = HKDF<SHA512>.deriveKey(inputKeyMaterial: SymmetricKey(data: masterData),
+                                               salt: Data(resIv),
+                                               info: Data(AppConfig.v4InfoRes.utf8),
+                                               outputByteCount: 32)
+            let resAad = Data((AppConfig.v4AadRes + ivHex).utf8)
+            guard let text = openBlob(data, key: resKey, aad: resAad),
+                  let objData = text.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: objData)) as? [String: Any] else {
+                completion(.failure(Failure.v4Unavailable)); return
+            }
+            completion(.success(obj))
+        }.resume()
     }
 
     /// 用第 candidate 组密钥发一次；服务端说密钥不对就换下一组重试

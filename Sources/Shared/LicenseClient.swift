@@ -62,7 +62,7 @@ final class LicenseClient {
     /// 续期：只推在线校验窗口，不改变卡密本身有效期
     func beat(pin: String, code: String,
               completion: @escaping (Result<LicenseState, Error>) -> Void) {
-        SecureChannel.post(Obfs.s(21), params: ["code": code], pin: pin) { result in
+        SecureChannel.post(Obfs.s(21), params: ["code": code, "ver": clientVer], pin: pin) { result in
             switch result {
             case .failure(let e):
                 completion(.failure(e))
@@ -84,10 +84,12 @@ final class LicenseClient {
     /// 卡密被作废 / 到期 / 被删，都会在这里如实返回对应 reason
     func check(pin: String,
                completion: @escaping (Result<LicenseState, Error>) -> Void) {
+        _ = Integrity.shared.arm(2)
         SecureChannel.post(Obfs.s(23),
                            params: ["itg": Integrity.shared.code,
                                     "b": AppConfig.buildNumber,
-                                    "fc": FeatureProbe.report],
+                                    "fc": FeatureProbe.report,
+                                    "ver": clientVer],
                            pin: pin) { result in
             switch result {
             case .failure(let e):
@@ -117,10 +119,16 @@ final class LicenseClient {
         }
     }
 
+    /// 客户端版本串：后台「在线设备」里显示的就是它
+    private var clientVer: String {
+        "\(AppConfig.appVersion) (\(AppConfig.buildNumber))"
+    }
+
     // MARK: - 解析
 
     /// 统一解析：窗口（expires_in / authorized_until）与卡密到期（card_seconds_left）分开落
     private func apply(_ obj: [String: Any], into st: inout LicenseState) {
+        _ = Integrity.shared.arm(1)
         let now = Date()
 
         let reason = (obj["reason"] as? String) ?? ""
@@ -135,6 +143,24 @@ final class LicenseClient {
 
         st.authorized = authorized
         st.verifiedAt = now
+
+        /* 1.2.0：卡密版本 / 封禁原因 / 强制下线 */
+        if let t = obj["tier"] as? String, !t.isEmpty {
+            st.tier = t.lowercased()
+        }
+        if let br = obj["ban_reason"] as? String, !br.isEmpty {
+            st.banReason = br
+        }
+        let kickFlag = (obj["kicked"] as? Bool) ?? (obj["kick"] as? Bool) ?? false
+        st.kicked = kickFlag
+        if let kr = obj["kick_reason"] as? String, !kr.isEmpty {
+            st.kickReason = kr
+        }
+        if kickFlag {
+            st.verdict = .kicked
+            st.authorized = false
+            st.sessionUntil = Date(timeIntervalSince1970: 0)
+        }
         if authorized { st.lastCheck = now }
 
         if let left = num(obj["expires_in"]) {

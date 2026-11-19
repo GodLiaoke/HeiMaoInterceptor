@@ -250,10 +250,19 @@ struct MainView: View {
     private var licenseCard: some View {
         GlassCard(padding: 16, corner: 24) {
             VStack(spacing: 13) {
-                HStack {
+                HStack(spacing: 8) {
                     Text("授权")
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundColor(HK.text)
+                    Text(model.license.tierLabel)
+                        .font(.system(size: 10, weight: .heavy, design: .rounded))
+                        .foregroundColor(HK.violet)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(HK.violet.opacity(0.14))
+                        )
                     Spacer()
                     GlassPill(text: model.license.statusText(),
                               icon: model.authorized ? "checkmark.seal.fill" : "lock.fill",

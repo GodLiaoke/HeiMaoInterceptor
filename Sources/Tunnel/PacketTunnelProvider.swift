@@ -41,6 +41,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
     override func startTunnel(options: [String: NSObject]?,
                               completionHandler: @escaping (Error?) -> Void) {
+        /* CRC 链第 3 环：隧道进程独立校验一次，链断只上报（不影响防护） */
+        _ = Integrity.shared.arm(3)
+
         guard let conf = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration else {
             completionHandler(TunnelError.missingConfiguration)
             return

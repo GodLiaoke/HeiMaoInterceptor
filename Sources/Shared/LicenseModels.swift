@@ -12,12 +12,13 @@ enum LicenseVerdict: String, Codable {
     case cardRevoked        = "card_revoked"       // 被后台作废
     case cardExpired        = "card_expired"       // 卡密到期
     case windowExpired      = "window_expired"     // 在线校验窗口过期（断网太久）
+    case kicked             = "kicked"             // 后台强制下线
     case unknown            = "unknown"            // 还没校验过（老数据）
 
     /// 这几种属于「彻底不能用了」，不享受任何离线宽限
     var isHardFailure: Bool {
         switch self {
-        case .cardRevoked, .cardExpired, .cardNotFound, .noCard: return true
+        case .cardRevoked, .cardExpired, .cardNotFound, .noCard, .kicked: return true
         default: return false
         }
     }
@@ -43,15 +44,22 @@ struct LicenseState: Codable {
     var note: String?
     var verdict: LicenseVerdict     // 服务端判定结果
     var verifiedAt: Date?           // 上次拿到服务端明确结论的时间
+    var tier: String                // 卡密版本：free / beta / pro / max
+    var banReason: String?          // 被封禁的原因（后台填写，客户端展示）
+    var kicked: Bool                // 是否被管理员强制下线
+    var kickReason: String?         // 下线原因
 
     enum CodingKeys: String, CodingKey {
         case pin, code, authorized, expireAt, sessionUntil, lastCheck,
-             configKid, configExpire, note, verdict, verifiedAt
+             configKid, configExpire, note, verdict, verifiedAt,
+             tier, banReason, kicked, kickReason
     }
 
     init(pin: String, code: String, authorized: Bool, expireAt: Date?, sessionUntil: Date?,
          lastCheck: Date, configKid: String?, configExpire: Date?, note: String?,
-         verdict: LicenseVerdict = .unknown, verifiedAt: Date? = nil) {
+         verdict: LicenseVerdict = .unknown, verifiedAt: Date? = nil,
+         tier: String = "pro", banReason: String? = nil,
+         kicked: Bool = false, kickReason: String? = nil) {
         self.pin = pin
         self.code = code
         self.authorized = authorized
@@ -63,6 +71,10 @@ struct LicenseState: Codable {
         self.note = note
         self.verdict = verdict
         self.verifiedAt = verifiedAt
+        self.tier = tier
+        self.banReason = banReason
+        self.kicked = kicked
+        self.kickReason = kickReason
     }
 
     /// 老版本数据兼容：缺 verdict 一律当 unknown（下次启动会被强制校验）
@@ -79,6 +91,10 @@ struct LicenseState: Codable {
         note = try? c.decodeIfPresent(String.self, forKey: .note)
         verdict = (try? c.decode(LicenseVerdict.self, forKey: .verdict)) ?? .unknown
         verifiedAt = try? c.decodeIfPresent(Date.self, forKey: .verifiedAt)
+        tier = (try? c.decode(String.self, forKey: .tier)) ?? "pro"
+        banReason = try? c.decodeIfPresent(String.self, forKey: .banReason)
+        kicked = (try? c.decode(Bool.self, forKey: .kicked)) ?? false
+        kickReason = try? c.decodeIfPresent(String.self, forKey: .kickReason)
     }
 
     static func empty(pin: String) -> LicenseState {
@@ -103,7 +119,7 @@ struct LicenseState: Codable {
             }
             return now.timeIntervalSince(lastCheck) < AppConfig.offlineGrace
 
-        case .cardRevoked, .cardExpired, .cardNotFound, .noCard:
+        case .cardRevoked, .cardExpired, .cardNotFound, .noCard, .kicked:
             return false
 
         case .windowExpired, .unknown:
@@ -119,9 +135,10 @@ struct LicenseState: Codable {
     func statusText(now: Date = Date()) -> String {
         if code.isEmpty { return "未激活" }
         switch verdict {
-        case .cardRevoked:   return "卡密已作废"
+        case .cardRevoked:   return "卡密已封禁"
         case .cardExpired:   return "卡密已过期"
         case .cardNotFound:  return "卡密不存在"
+        case .kicked:        return "已被强制下线"
         case .noCard:        return "未绑定卡密"
         case .ok:
             if let exp = expireAt, exp <= now { return "卡密已过期" }
@@ -137,7 +154,16 @@ struct LicenseState: Codable {
         guard !isUsable() else { return nil }
         if code.isEmpty { return "还没有激活卡密，开启防护前请先输入卡密" }
         switch verdict {
-        case .cardRevoked:   return "这张卡密已被后台作废，防护已停止。如需继续使用请联系管理员或换一张卡"
+        case .cardRevoked:
+            if let r = banReason, !r.isEmpty {
+                return "这张卡密已被封禁：\(r)。防护已停止，如有疑问请联系管理员"
+            }
+            return "这张卡密已被封禁，防护已停止。如需继续使用请联系管理员或换一张卡"
+        case .kicked:
+            if let r = kickReason, !r.isEmpty {
+                return "当前设备已被管理员强制下线：\(r)。VPN 已断开、规则已清空"
+            }
+            return "当前设备已被管理员强制下线。VPN 已断开、规则已清空"
         case .cardExpired:   return "卡密已到期，防护已停止。续费后点「刷新状态」即可恢复"
         case .cardNotFound:  return "这张卡密已不存在，请重新激活"
         case .noCard:        return "当前设备没有绑定卡密"
@@ -172,6 +198,17 @@ struct LicenseState: Codable {
         f.locale = Locale(identifier: "zh_CN")
         f.dateFormat = "HH:mm:ss"
         return f.string(from: s)
+    }
+
+    /// 卡密版本（界面徽章）：FREE / BETA / PRO / MAX
+    var tierLabel: String {
+        let t = tier.lowercased()
+        switch t {
+        case "free": return "FREE"
+        case "beta": return "BETA"
+        case "max":  return "MAX"
+        default:     return "PRO"
+        }
     }
 
     var maskedCode: String {

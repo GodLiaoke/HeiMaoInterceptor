@@ -7,8 +7,8 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
-    static let appVersion     = "1.1.1"
-    static let buildNumber    = 117          // 1.1.1 build117（全接管+精确例外路由 / 断线自恢复 / DNS 固定 worker 池）
+    static let appVersion     = "1.2.0"
+    static let buildNumber    = 118          // 1.2.0 build118（v4 裸密文通道 / 卡密版本分层 / 强制下线 / CRC 链校验）
     static let apiBase        = Obfs.join(0, 1)
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
@@ -51,4 +51,11 @@ enum AppConfig {
     /// 云端规则包密钥派生参数（必须与服务端 RulesService 一致）
     static let rulesSalt = Obfs.join(6, 7)
     static let rulesInfo = Obfs.join(8, 9)
+
+    /* v4 通道（裸密文）：密钥派生标签与签名前缀，全部走混淆表 */
+    static let v4InfoReq = Obfs.s(28)
+    static let v4InfoRes = Obfs.s(29)
+    static let v4AadReq  = Obfs.s(30)
+    static let v4AadRes  = Obfs.s(31)
+    static let v4SigTag  = Obfs.s(32)
 }

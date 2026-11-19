@@ -54,6 +54,11 @@ def plist_text():
     return "\n".join(out)
 
 
+# 构建期由 Tools/gen_crc.py 重新生成并引用的类型，不能改名：
+# 生成脚本按原名写文件，改名后 Integrity.swift 里的引用会对不上。
+PROTECTED_TYPES = {"IntegritySeal"}
+
+
 def short_name(name: str) -> str:
     h = hashlib.sha256(("hm-obf|" + name).encode()).hexdigest()[:6]
     return "_x" + h
@@ -79,6 +84,9 @@ def main():
     skipped = []
     for name in sorted(candidates):
         if len(name) < 2:
+            continue
+        if name in PROTECTED_TYPES:
+            skipped.append((name, "protected"))
             continue
         if name in guarded:
             skipped.append((name, "plist"))

@@ -40,6 +40,13 @@ jobs:
             if grep -rq "\b$n\b" Sources/ 2>/dev/null; then echo "SYMBOL_LEFT: $n"; fi
           done
 
+      - name: Generate CRC seal
+        run: |
+          # 1.2.0：把每个源文件的 CRC32 写进 IntegritySeal（运行时逐层复算）
+          # 必须在 rename_types 之后跑，否则改名后的内容与表里对不上
+          python3 Tools/gen_crc.py
+          grep -q "IntegritySeal" Sources/Shared/IntegritySeal.swift && echo CRC_SEAL_OK
+
       - name: Syntax pre-check
         run: |
           # 只做语法解析，不做类型检查：几秒钟就能拦住拼写/括号这类低级错误，

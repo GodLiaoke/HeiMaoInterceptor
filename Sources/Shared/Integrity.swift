@@ -20,6 +20,12 @@ final class Integrity {
     private(set) var debugged = false
     private(set) var bundleAltered = false
 
+    /* 1.2.0：CRC 链校验状态。crc 异常只上报、不拦用户（自签/重签环境本来就改包） */
+    private var chainBroken = false
+    private var sealChecked = false
+    private var stagesSeen = Set<Int>()
+    private let chainLock = NSLock()
+
     private var evaluated = false
     private let lock = NSLock()
 
@@ -31,6 +37,8 @@ final class Integrity {
         lock.lock(); defer { lock.unlock() }
         if !injected.isEmpty { return "inj" }
         if debugged { return "dbg" }
+        if !sealChecked { _ = sealFoldCheck() }
+        if chainBroken { return "crc" }
         if bundleAltered { return "bed" }
         return "ok"
     }
@@ -41,8 +49,10 @@ final class Integrity {
     /// 注入的库只上报不降级 —— 巨魔用户常装插件，不能因此让人家每次冷启动都要重新联网。
     var trustedLocally: Bool {
         evaluate()
+        _ = arm(9)
         lock.lock(); defer { lock.unlock() }
-        return !debugged
+        chainLock.lock(); defer { chainLock.unlock() }
+        return !debugged && !chainBroken
     }
 
     func evaluate() {
@@ -60,6 +70,96 @@ final class Integrity {
         bundleAltered = !intact
         evaluated = true
         lock.unlock()
+    }
+
+    // MARK: - CRC 环环校验（1.2.0）
+    //
+    // 构建期把每个源文件的 CRC32 写进 IntegritySeal，运行时按层校验：
+    //   arm(stage) -> checkA() -> checkB() -> checkC()
+    // 每一层都依赖下一层的返回值，任意一层被改动/跳过，链就断。
+    // 结果只用于上报和「本地是否值得信任」，不改用户能不能用。
+
+    /// 逐字节 CRC32（与构建脚本 Tools/gen_crc.py 完全一致）
+    @inline(never)
+    private func crc32(_ seed: UInt32, _ bytes: [UInt32]) -> UInt32 {
+        var c = seed ^ 0xFFFF_FFFF
+        for v in bytes {
+            var x = v
+            var i = 0
+            while i < 4 {
+                c ^= (x & 0xFF)
+                var k = 0
+                while k < 8 {
+                    c = (c & 1) == 1 ? ((c >> 1) ^ 0xEDB8_8320) : (c >> 1)
+                    k += 1
+                }
+                x >>= 8
+                i += 1
+            }
+        }
+        return c ^ 0xFFFF_FFFF
+    }
+
+    @inline(never)
+    private func sealFold() -> UInt32 {
+        var acc: UInt32 = 0x811C_9DC5
+        for (i, v) in IntegritySeal.parts.enumerated() {
+            acc = crc32(acc &+ UInt32(truncatingIfNeeded: i &* 2654435761), [v])
+        }
+        return acc
+    }
+
+    @inline(never)
+    private func tokenOk(_ index: Int) -> Bool {
+        let parts = IntegritySeal.parts
+        guard !parts.isEmpty else { return false }
+        let v = parts[index % parts.count]
+        let mix = (v &* 2654435761) ^ UInt32(truncatingIfNeeded: index)
+        return (mix & 0xFFFF) == IntegritySeal.tokens[index % IntegritySeal.tokens.count]
+    }
+
+    @inline(never)
+    private func checkC() -> Bool {
+        return IntegritySeal.parts.count == IntegritySeal.count && tokenOk(0) && tokenOk(1)
+    }
+
+    @inline(never)
+    private func checkB(_ a: Bool) -> Bool {
+        return a && checkC() && tokenOk(2)
+    }
+
+    @inline(never)
+    private func checkA() -> Bool {
+        return sealFold() == IntegritySeal.digest
+    }
+
+    /// 关键函数入口调用这个：任何一环对不上，链就断
+    @discardableResult
+    @inline(never)
+    func arm(_ stage: Int) -> Bool {
+        chainLock.lock(); defer { chainLock.unlock() }
+        let ok = checkB(checkA())
+        if !ok { chainBroken = true }
+        stagesSeen.insert(stage)
+        sealChecked = true
+        return ok
+    }
+
+    @inline(never)
+    private func sealFoldCheck() -> Bool {
+        let ok = checkB(checkA())
+        chainLock.lock()
+        chainBroken = chainBroken || !ok
+        sealChecked = true
+        chainLock.unlock()
+        return ok
+    }
+
+    /// 链完整度（诊断上报用）
+    var chain: String {
+        chainLock.lock(); defer { chainLock.unlock() }
+        if chainBroken { return "crc" }
+        return stagesSeen.count >= 3 ? "ok" : "p\(stagesSeen.count)"
     }
 
     // MARK: - 注入
