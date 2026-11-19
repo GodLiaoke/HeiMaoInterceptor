@@ -25,7 +25,7 @@ enum IntegritySeal {
         0xFA1C96DD,
         0x6B1C8104,
         0x5A45A63A,
-        0x022DBE3A,
+        0x3FBB44CF,
         0x8A24B15B,
         0x7CA8F7F0,
         0x64B88850,
@@ -36,8 +36,8 @@ enum IntegritySeal {
         0x32A3B771,
         0x78DA258A
     ]
-    static let digest: UInt32 = 0xC82B38EB
+    static let digest: UInt32 = 0x6C6826B6
     static let count: Int = 29
     static let tokens: [UInt32] = [0x7B62, 0xD4F0, 0x16DA, 0x7443]
-    static let noise: UInt32 = 0x2EC69C67
+    static let noise: UInt32 = 0xD889C2A8
 }
