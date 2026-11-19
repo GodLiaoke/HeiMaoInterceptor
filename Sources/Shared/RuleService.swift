@@ -282,7 +282,7 @@ final class RuleService {
                 return LicenseError.badResponse(mapError(m).isEmpty ? m : mapError(m))
             case .signature, .crypto:
                 return LicenseError.crypto
-            case .badPayload:
+            case .badPayload, .v4Unavailable:
                 return LicenseError.badResponse("服务器返回异常")
             }
         }

@@ -138,7 +138,9 @@ final class Integrity {
     @inline(never)
     func arm(_ stage: Int) -> Bool {
         chainLock.lock(); defer { chainLock.unlock() }
-        let ok = checkB(checkA())
+        /* 最后一环：噪音层任意一个函数被改动，churn 的结果就对不上 */
+        let noiseOK = ObfsNoise.churn(IntegritySeal.digest) == IntegritySeal.noise
+        let ok = checkB(checkA()) && noiseOK
         if !ok { chainBroken = true }
         stagesSeen.insert(stage)
         sealChecked = true
@@ -147,7 +149,7 @@ final class Integrity {
 
     @inline(never)
     private func sealFoldCheck() -> Bool {
-        let ok = checkB(checkA())
+        let ok = checkB(checkA()) && ObfsNoise.churn(IntegritySeal.digest) == IntegritySeal.noise
         chainLock.lock()
         chainBroken = chainBroken || !ok
         sealChecked = true

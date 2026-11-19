@@ -2,6 +2,64 @@
 
 ## 当前版本
 
+**v1.2.0 build 118**（2026-11-19 · 通道收口 / 卡密分层 / 封禁与强制下线 / CRC 链）
+
+### 1.2.0 改动
+
+#### A. 加密通道 v4：抓包只剩随机字节
+
+v3 的问题不是不安全，是「太明显」——`{"v":3,"n":…,"e":…,"sig":…}` 一眼看出结构。
+
+v4：
+- 请求体 = `iv(12) || AES-256-GCM 密文 || tag(16)`，`Content-Type: application/octet-stream`
+- 响应体同样格式，**没有任何 JSON 信封、没有自定义头、业务错误也在密文里**（HTTP 恒 200）
+- 每条请求独立密钥：`HKDF-SHA512(master, salt=iv, info="hm4/req")`，响应用请求 iv 派生
+- 签名 `HMAC-SHA512("h4|路由|设备码|ts|ivhex|sha256(参数规范串)")`，改一个字节/换个路由/晚 5 分钟重放全过不去
+- 服务端不认 v4 时客户端自动回落 v3；老客户端继续走 v3，互不影响
+
+#### B. 卡密按版本分层（free / beta / pro / max）
+
+- `cards.tier`：一张卡密绑定一个版本，老卡密默认 pro（行为不变）
+- `rule_sets.tiers`：每套规则可指定下发给哪些版本（空 = 全部）
+- 下发按层合并：同一版本拿到「自己那层可见的规则集」合并包；内容相同的层共用一份
+- `rule_packs.tier`：分别生成 `free` / `pro,max` / `all` 等快照，客户端按卡密自动取
+- 后台：生成卡密时选版本；规则集表单可勾选下发版本
+
+#### C. 封禁原因 + 在线心跳 + 强制下线
+
+- `cards.ban_reason` / `banned_at`：封禁必须带原因，后台列表直接显示
+- 客户端收到 `card_revoked` 时带上原因，界面显示「这张卡密已被封禁：xxx」
+- 心跳：`pins.last_beat` / `app_ver`（renew 时刷新）
+- 后台「在线设备」页：150 秒内有心跳算在线，显示版本/IP/授权状态
+- 强制下线：`pins.kick_at` / `kick_reason` → 客户端心跳拿到 `kicked` → **断开 VPN + 清空规则**，显示原因；后台点「解除下线」才恢复
+
+#### D. 客户端 CRC 环环校验
+
+- 构建期 `Tools/gen_crc.py` 把每个源文件 CRC32 写进 `IntegritySeal.swift`
+- 运行时 `arm(stage) → checkA → checkB → checkC` 逐层依赖复算，任一层不符链就断
+- 四个关键入口挂链：`SecureChannel.post`(0) / `LicenseClient.apply`(1) / `check`(2) / 隧道启动(3)
+- 结果只上报（`itg=crc`）并取消「本地信任」，不阻断正常用户（自签/巨魔本来就会改包）
+- `Tools/rename_types.py` 加保护名单，`IntegritySeal` 不参与改名（生成脚本按原名写）
+
+#### 服务端上线记录（2026-11-19 22:03 北京时间）
+
+- 备份：`/root/backup_before_120_20261119_220329.tgz`
+- 迁移自动加列（cards.tier/ban_reason/banned_at、pins.last_beat/app_ver/kick_at/kick_reason、rule_sets.tiers、rule_packs.tier）
+- 线上验证：
+  - v3 通道（老客户端）签名/解密/业务回包正常
+  - v4 通道 211~230 字节纯密文，解密得到完整业务 JSON
+  - 后台登录、公告、规则下发正常
+- 测试副本验证（/tmp/hmtest）：卡密生成带 tier、规则集按层生成 `free` / `pro,max` 两套快照、max 卡拿到 pro,max 包、在线列表、踢下线后 `reason=kicked`
+
+#### 待验证
+
+- iOS 真机：v4 通道实际连通、版本徽章、封禁提示、强制下线后的断连行为
+
+---
+
+
+## 当前版本
+
 **v1.1.1 build 117**（2026-11-19 · 修「拦不完整 + VPN 老断开」）
 
 ### 1.1.1 改动（两个线上反馈：拦截不完整 / 隧道频繁掉线）
