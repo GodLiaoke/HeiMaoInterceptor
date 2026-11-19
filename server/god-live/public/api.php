@@ -6,14 +6,16 @@ require __DIR__ . '/../app/Services/PinService.php';
 require __DIR__ . '/../app/Services/SessionService.php';
 require __DIR__ . '/../app/Services/CardService.php';
 require __DIR__ . '/../app/Services/RulesService.php';
+require __DIR__ . '/../app/Services/RuleSetService.php';
 require __DIR__ . '/../app/Services/VersionService.php';
 require __DIR__ . '/../app/Services/AdminService.php';
 require __DIR__ . '/../app/Services/NoticeService.php';
 require __DIR__ . '/../app/Services/CryptoService.php';
 require __DIR__ . '/../app/Services/SettingsService.php';
+require __DIR__ . '/../app/Services/TierService.php';
 require __DIR__ . '/../app/Services/AuthGate.php';
+require __DIR__ . '/../app/Services/SecureV4.php';
 require __DIR__ . '/../app/Services/SecureV3.php';
-require __DIR__ . '/../app/Services/RuleNormalizer.php';
 
 $path   = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $path   = str_replace('/api/', '', $path);
@@ -58,7 +60,9 @@ try {
             if (!RateLimit::hit('ip:' . $ip, (int) Config::get('rate_ip'))) {
                 Res::abort(429, 'rate_limited');
             }
-            $pin = PinService::normalise((string) (Req::p('pin', '')));
+            $b = Req::all();
+            $pin = PinService::normalise((string) ($b['pin'] ?? ''));
+            $dev = (string) ($b['dev'] ?? '');
             if (!PinService::valid($pin)) {
                 Res::abort(400, 'bad_pin');
             }
@@ -67,6 +71,15 @@ try {
             }
             PinService::touch($pin, $ip, $ua);
             $r = AuthGate::check($pin);
+
+            /* 重装后设备码变了、手上又没带卡密：按设备指纹把卡密认回来 */
+            if (!$r['authorized'] && (string) ($r['reason'] ?? '') === AuthGate::NO_CARD && $dev !== '') {
+                $ad = SessionService::adoptByDev($pin, $dev, $ip, $ua);
+                if ($ad !== null && !empty($ad['ok'])) {
+                    $r = AuthGate::check($pin);
+                }
+            }
+
             if (!$r['authorized']) {
                 CardService::event('auth_check_fail', $pin, null, $ip, $ua, (string) $r['reason']);
             }
@@ -84,7 +97,11 @@ try {
                 Res::abort(400, 'bad_pin');
             }
             PinService::touch($pin, $ip, $ua);
-            Res::json(['ok' => true] + PinService::status($pin));
+            /* 1.2.0：心跳带客户端版本，后台「在线」页按它判在线；
+               同时回传是否被管理员强制下线（客户端据此断隧道 + 清规则） */
+            $b = Req::all();
+            $ver = (string) ($b['ver'] ?? '');
+            Res::json(SessionService::beat($pin, $ver, $ip, $ua));
         }
 
         // ---------- 网页：配对码 + 卡密兑换 ----------
@@ -95,6 +112,7 @@ try {
             $b = Req::all();
             $pin = PinService::normalise((string) ($b['pin'] ?? ''));
             $code = (string) ($b['code'] ?? '');
+            $dev = (string) ($b['dev'] ?? '');
             if (!PinService::valid($pin)) {
                 Res::abort(400, 'bad_pin');
             }
@@ -102,9 +120,11 @@ try {
                 Res::abort(429, 'rate_limited');
             }
             PinService::touch($pin, $ip, $ua);
-            $r = CardService::redeem($pin, $code, $ip, $ua);
+            $r = CardService::redeem($pin, $code, $ip, $ua, $dev);
             if (!$r['ok']) {
-                Res::json(['ok' => false, 'error' => $r['error']], 200);
+                Res::json(['ok' => false, 'error' => $r['error']]
+                    + (isset($r['ban_reason']) ? ['ban_reason' => $r['ban_reason']] : [])
+                    + (isset($r['kick_reason']) ? ['kick_reason' => $r['kick_reason']] : []), 200);
             }
             /* 同时返回窗口（expire_at，兼容旧客户端）与卡密真实到期（card_expire_at） */
             Res::json($r);
@@ -118,6 +138,7 @@ try {
             $b = Req::all();
             $pin = PinService::normalise((string) ($b['pin'] ?? ''));
             $code = (string) ($b['code'] ?? '');
+            $dev = (string) ($b['dev'] ?? '');
             if (!PinService::valid($pin)) {
                 Res::abort(400, 'bad_pin');
             }
@@ -125,9 +146,11 @@ try {
                 Res::abort(429, 'rate_limited');
             }
             PinService::touch($pin, $ip, $ua);
-            $r = SessionService::renew($pin, $code, $ip, $ua);
+            $r = SessionService::renew($pin, $code, $ip, $ua, $dev, (string) ($b['ver'] ?? ''));
             if (!$r['ok']) {
-                Res::json(['ok' => false, 'error' => $r['error']], 200);
+                Res::json(['ok' => false, 'error' => $r['error']]
+                    + (isset($r['ban_reason']) ? ['ban_reason' => $r['ban_reason']] : [])
+                    + (isset($r['kick_reason']) ? ['kick_reason' => $r['kick_reason']] : []), 200);
             }
             Res::json($r);
         }
@@ -159,11 +182,15 @@ try {
                 Res::abort(429, 'rate_limited');
             }
             PinService::touch($pin, $ip, $ua);
-            $s = SessionService::renew($pin, $code, $ip, $ua);
+            $dev = (string) ($b['dev'] ?? '');
+            $s = SessionService::renew($pin, $code, $ip, $ua, $dev, (string) ($b['ver'] ?? ''));
             if (!$s['ok']) {
-                Res::json(['ok' => false, 'error' => $s['error']], 403);
+                Res::json(['ok' => false, 'error' => $s['error']]
+                    + (isset($s['ban_reason']) ? ['ban_reason' => $s['ban_reason']] : [])
+                    + (isset($s['kick_reason']) ? ['kick_reason' => $s['kick_reason']] : []), 403);
             }
-            Res::json(RulesService::manifest());
+            /* 卡密属于哪个版本，就下发哪一层规则 */
+            Res::json(RulesService::manifest((string) ($s['tier'] ?? TierService::PRO)));
         }
 
         case 'rules/download|POST': {
@@ -179,11 +206,13 @@ try {
             if (!RateLimit::hit('rd:' . $pin, 20)) {
                 Res::abort(429, 'rate_limited');
             }
-            $s = SessionService::renew($pin, $code, $ip, $ua);
+            $dev = (string) ($b['dev'] ?? '');
+            $s = SessionService::renew($pin, $code, $ip, $ua, $dev, (string) ($b['ver'] ?? ''));
             if (!$s['ok']) {
                 Res::json(['ok' => false, 'error' => $s['error']], 403);
             }
-            $pack = RulesService::current();
+            $tier = (string) ($s['tier'] ?? TierService::PRO);
+            $pack = RulesService::current($tier);
             if (!$pack) {
                 Res::json(['ok' => false, 'error' => 'no_rules'], 404);
             }
@@ -327,7 +356,8 @@ try {
                 (int) ($b['duration'] ?? Config::get('grant_seconds', 300)),
                 substr((string) ($b['batch'] ?? 'B' . date('Ymd')), 0, 32),
                 $planTag . substr((string) ($b['note'] ?? ''), 0, 110),
-                $admin, $ip, $charset
+                $admin, $ip, $charset,
+                (string) ($b['tier'] ?? TierService::PRO)
             );
             Res::json(['ok' => true] + $r);
         }
@@ -336,7 +366,12 @@ try {
             $admin = AdminService::require();
             AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
             $b = Req::all();
-            $ok = CardService::setStatus((int) ($b['id'] ?? 0), (int) ($b['status'] ?? 0), $admin, $ip);
+            $ok = CardService::setStatus(
+                (int) ($b['id'] ?? 0),
+                (int) ($b['status'] ?? 0),
+                $admin, $ip,
+                (string) ($b['reason'] ?? '')
+            );
             Res::json(['ok' => $ok]);
         }
 
@@ -363,6 +398,28 @@ try {
             AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
             $b = Req::all();
             Res::json(['ok' => CardService::unbind((int) ($b['id'] ?? 0), $admin, $ip)]);
+        }
+
+        // ---------- 后台：卡密详情 / 改等级 ----------
+        case 'admin/cards/detail|GET': {
+            AdminService::require();
+            $card = CardService::detail((int) Req::p('id', 0));
+            if (!$card) {
+                Res::json(['ok' => false, 'error' => 'not_found'], 404);
+            }
+            Res::json(['ok' => true, 'card' => $card]);
+        }
+
+        case 'admin/cards/tier|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b = Req::all();
+            Res::json(CardService::setTier(
+                (int) ($b['id'] ?? 0),
+                (string) ($b['tier'] ?? ''),
+                $admin,
+                $ip
+            ));
         }
 
         // ---------- 后台：版本管理 ----------
@@ -395,21 +452,6 @@ try {
             Res::json(['ok' => true, 'current' => $pack, 'content' => RulesService::content((int) $pack['id'])]);
         }
 
-        case 'admin/rules/import|POST': {
-            /* 导入 txt：把任意格式的规则统一成客户端认识的三段式，
-               只做格式转换，不落库；后台确认后再走 /admin/rules/save */
-            AdminService::require();
-            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
-            $b = Req::all();
-            $raw = (string) ($b['content'] ?? '');
-            if (strlen($raw) > 4 * 1024 * 1024) {
-                Res::json(['ok' => false, 'error' => 'too_large',
-                           'message' => '文件超过 4MB，拆一下再导入'], 400);
-            }
-            $r = RuleNormalizer::normalise($raw);
-            Res::json($r, $r['ok'] ? 200 : 400);
-        }
-
         case 'admin/rules/save|POST': {
             $admin = AdminService::require();
             AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
@@ -421,6 +463,143 @@ try {
                 $admin, $ip
             );
             Res::json($r, $r['ok'] ? 200 : 400);
+        }
+
+        // ---------- 后台：规则包 TXT 导入（只解析，不落库；确认后再走 save） ----------
+        case 'admin/rules/import|POST': {
+            AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+
+            $raw = '';
+            $name = '';
+            if (!empty($_FILES['file']) && is_array($_FILES['file'])) {
+                $f = $_FILES['file'];
+                if ((int) ($f['error'] ?? 1) !== UPLOAD_ERR_OK) {
+                    Res::json(['ok' => false, 'error' => 'upload_failed'], 400);
+                }
+                if ((int) ($f['size'] ?? 0) > 2 * 1024 * 1024) {
+                    Res::json(['ok' => false, 'error' => 'too_large'], 413);
+                }
+                $raw = (string) file_get_contents((string) $f['tmp_name']);
+                $name = (string) ($f['name'] ?? '');
+            } else {
+                /* 没有文件就走粘贴文本，兼容直接贴进来再点导入 */
+                $b = Req::all();
+                $raw = (string) ($b['content'] ?? $b['text'] ?? '');
+                if (strlen($raw) > 2 * 1024 * 1024) {
+                    Res::json(['ok' => false, 'error' => 'too_large'], 413);
+                }
+            }
+
+            if (trim($raw) === '') {
+                Res::json(['ok' => false, 'error' => 'empty'], 400);
+            }
+
+            Res::json(['ok' => true, 'name' => $name] + RulesService::importText($raw));
+        }
+
+        /* ══════════ 后台：多套规则集（下发哪几套由后台勾选决定） ══════════ */
+
+        case 'admin/rulesets|GET': {
+            AdminService::require();
+            RuleSetService::ensureSeed();
+            Res::json([
+                'ok'      => true,
+                'rows'    => RuleSetService::all(),
+                'summary' => RuleSetService::summary(),
+            ]);
+        }
+
+        /* 取某一套的完整内容（编辑用） */
+        case 'admin/rulesets/get|POST': {
+            AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b   = Req::all();
+            $row = RuleSetService::get((int) ($b['id'] ?? 0));
+            if (!$row) {
+                Res::json(['ok' => false, 'error' => 'not_found'], 404);
+            }
+            Res::json(['ok' => true, 'row' => $row]);
+        }
+
+        /* 新建 / 改名 / 改内容：填个名字就能存，同名自动覆盖 */
+        case 'admin/rulesets/save|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $r = RuleSetService::save(Req::all(), $admin, $ip);
+            Res::json($r, $r['ok'] ? 200 : 400);
+        }
+
+        case 'admin/rulesets/delete|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b = Req::all();
+            $r = RuleSetService::remove((int) ($b['id'] ?? 0), $admin, $ip);
+            Res::json($r, $r['ok'] ? 200 : 400);
+        }
+
+        /* 勾选某套下发 / 取消下发（立刻重算快照） */
+        case 'admin/rulesets/toggle|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b = Req::all();
+
+            if (isset($b['ids']) && is_array($b['ids'])) {
+                Res::json(RuleSetService::setEnabledMany($b['ids'], $admin, $ip));
+            }
+            $r = RuleSetService::setEnabled(
+                (int) ($b['id'] ?? 0),
+                !empty($b['enabled']) ? 1 : 0,
+                $admin,
+                $ip
+            );
+            Res::json($r, $r['ok'] ? 200 : 400);
+        }
+
+        /* 调整规则集下发顺序（合并顺序） */
+        case 'admin/rulesets/sort|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b   = Req::all();
+            $dir = ((string) ($b['dir'] ?? 'up')) === 'down' ? 1 : -1;
+            $r = RuleSetService::move((int) ($b['id'] ?? 0), $dir, $admin, $ip);
+            Res::json($r, $r['ok'] ? 200 : 400);
+        }
+
+        /* 手动重算一次下发快照（改完规则或排查用） */
+        case 'admin/rulesets/apply|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $r = RuleSetService::rebuild($admin, $ip);
+            Res::json($r, $r['ok'] ? 200 : 400);
+        }
+
+        /* ══════════ 1.2.0 在线心跳 / 强制下线 ══════════ */
+        case 'admin/online|GET': {
+            AdminService::require();
+            Res::json(['ok' => true] + SessionService::online(150, 300));
+        }
+
+        case 'admin/kick|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b = Req::all();
+            $pin = PinService::normalise((string) ($b['pin'] ?? ''));
+            if (!PinService::valid($pin)) {
+                Res::json(['ok' => false, 'error' => 'bad_pin'], 400);
+            }
+            Res::json(SessionService::kick($pin, (string) ($b['reason'] ?? ''), $admin, $ip));
+        }
+
+        case 'admin/unkick|POST': {
+            $admin = AdminService::require();
+            AdminService::checkCsrf($_SERVER['HTTP_X_CSRF'] ?? null);
+            $b = Req::all();
+            $pin = PinService::normalise((string) ($b['pin'] ?? ''));
+            if (!PinService::valid($pin)) {
+                Res::json(['ok' => false, 'error' => 'bad_pin'], 400);
+            }
+            Res::json(SessionService::unkick($pin, $admin, $ip));
         }
 
         case 'admin/pins|GET': {
@@ -462,7 +641,7 @@ try {
             foreach ($ids as $id) {
                 $id = (int) $id;
                 if ($id <= 0) continue;
-                if ($action === 'ban')      { CardService::setStatus($id, 2, $admin, $ip); $done++; }
+                if ($action === 'ban')      { CardService::setStatus($id, 2, $admin, $ip, (string) ($b['reason'] ?? '')); $done++; }
                 elseif ($action === 'unban'){ CardService::setStatus($id, 0, $admin, $ip); $done++; }
                 elseif ($action === 'delete'){ CardService::remove($id, $admin, $ip); $done++; }
                 elseif ($action === 'extend' && $days !== 0) { CardService::extend($id, $days, $admin, $ip); $done++; }

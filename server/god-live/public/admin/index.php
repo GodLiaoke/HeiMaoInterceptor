@@ -1,6 +1,10 @@
 <?php
 declare(strict_types=1);
 require __DIR__ . '/../../app/bootstrap.php';
+/* 后台页面不缓存：避免手机浏览器拿着旧版脚本，和新接口对不上 */
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+header('Expires: 0');
 ?>
 <!doctype html>
 <html lang="zh-CN">
@@ -10,6 +14,61 @@ require __DIR__ . '/../../app/bootstrap.php';
 <meta name="robots" content="noindex,nofollow">
 <title>卡密控制台</title>
 <link rel="stylesheet" href="/assets/admin.css">
+<style>
+/* ── 卡密等级 ── */
+.tier {
+  display: inline-block; padding: 1px 7px; border-radius: var(--r-1);
+  font-size: 11px; font-weight: 600; letter-spacing: .4px;
+  border: 1px solid var(--c-line-2); color: var(--c-text-2); background: var(--c-bg-sunken);
+  white-space: nowrap;
+}
+.tier-free { color: var(--c-text-3); }
+.tier-beta { color: #1e40af; border-color: #bfdbfe; background: #eff6ff; }
+.tier-pro  { color: #166534; border-color: #bbf7d0; background: #f0fdf4; }
+.tier-max  { color: #92400e; border-color: #fde68a; background: #fffbeb; }
+
+/* ── 卡密详情抽屉 ── */
+.cd[hidden] { display: none; }
+.cd { position: fixed; inset: 0; z-index: 60; }
+.cd-mask { position: absolute; inset: 0; background: rgba(24, 24, 27, .32); }
+.cd-panel {
+  position: absolute; top: 0; right: 0; bottom: 0; width: min(520px, 100%);
+  background: var(--c-bg); border-left: 1px solid var(--c-line);
+  display: flex; flex-direction: column;
+  box-shadow: -12px 0 32px rgba(24, 24, 27, .08);
+}
+.cd-head {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-3);
+  padding: var(--s-4) var(--s-5); border-bottom: 1px solid var(--c-line);
+}
+.cd-code { font-size: var(--f-4); font-weight: 600; letter-spacing: .4px; }
+.cd-meta {
+  margin-top: var(--s-2); display: flex; align-items: center; gap: var(--s-2);
+  flex-wrap: wrap; font-size: var(--f-1); color: var(--c-text-3);
+}
+.cd-body { flex: 1; overflow: auto; padding: var(--s-4) var(--s-5) var(--s-7); -webkit-overflow-scrolling: touch; }
+.cd-sec { margin-bottom: var(--s-5); }
+.cd-sec > h4 {
+  margin: 0 0 var(--s-2); font-size: var(--f-1); font-weight: 600;
+  color: var(--c-text-3); text-transform: uppercase; letter-spacing: .6px;
+}
+.cd-kv { margin: 0; display: grid; grid-template-columns: 96px 1fr; gap: var(--s-2) var(--s-3); }
+.cd-kv dt { color: var(--c-text-3); font-size: var(--f-2); }
+.cd-kv dd { margin: 0; font-size: var(--f-2); color: var(--c-text); word-break: break-all; }
+.cd-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-top: var(--s-3); align-items: center; }
+.cd-events { margin: 0; padding: 0; list-style: none; }
+.cd-events li {
+  display: flex; gap: var(--s-3); padding: 6px 0;
+  border-bottom: 1px solid var(--c-bg-sunken); font-size: var(--f-2);
+}
+.cd-events .t { color: var(--c-text-3); white-space: nowrap; font-variant-numeric: tabular-nums; }
+@media (max-width: 720px) {
+  .cd-panel { width: 100%; border-left: 0; }
+  .cd-kv { grid-template-columns: 84px 1fr; }
+  .cd-head, .cd-body { padding-left: var(--s-4); padding-right: var(--s-4); }
+}
+</style>
+
 </head>
 <body>
 
@@ -49,9 +108,10 @@ require __DIR__ . '/../../app/bootstrap.php';
     <nav class="nav" id="nav">
       <button class="nav-item active" data-view="overview" data-icon="grid">概览</button>
       <button class="nav-item" data-view="cards" data-icon="key">卡密</button>
+      <button class="nav-item" data-view="online" data-icon="grid">在线设备</button>
       <button class="nav-item" data-view="pins" data-icon="link">配对码</button>
       <button class="nav-item" data-view="notice" data-icon="message">公告</button>
-      <button class="nav-item" data-view="versions" data-icon="cloud">版本</button>
+      <button class="nav-item" data-view="versions" data-icon="cloud">版本与规则</button>
       <button class="nav-item" data-view="logs" data-icon="list">日志</button>
       <button class="nav-item" data-view="settings" data-icon="sliders">设置</button>
     </nav>
@@ -134,6 +194,16 @@ require __DIR__ . '/../../app/bootstrap.php';
             </label>
 
             <label class="field">
+              <span class="label">卡密版本（决定能拿到哪套规则）</span>
+              <select id="g_tier" class="select">
+                <option value="free">FREE · 基础规则</option>
+                <option value="beta">BETA · 测试通道</option>
+                <option value="pro" selected>PRO · 正式版</option>
+                <option value="max">MAX · 全量规则</option>
+              </select>
+            </label>
+
+            <label class="field">
               <span class="label">数量</span>
               <input id="g_count" class="input" type="number" min="1" max="1000" value="10">
             </label>
@@ -211,6 +281,7 @@ require __DIR__ . '/../../app/bootstrap.php';
                 <th style="width:130px">批次</th>
                 <th style="width:90px">时长</th>
                 <th style="width:90px">状态</th>
+                <th style="width:86px">等级</th>
                 <th style="width:170px">到期时间</th>
                 <th>操作</th>
               </tr>
@@ -249,6 +320,52 @@ require __DIR__ . '/../../app/bootstrap.php';
             </tr>
           </thead>
           <tbody id="pinRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 在线设备 -->
+    <section class="page" id="view-online" hidden>
+      <div class="page-head">
+        <h2>在线设备</h2>
+        <p>客户端心跳（150 秒内有心跳算在线），可强制下线并显示原因</p>
+      </div>
+
+      <div class="group">
+        <div class="group-head">
+          <h3>强制下线</h3>
+          <p>被下线的设备会立刻断开 VPN 并清空本地规则，直到这里点「解除」</p>
+        </div>
+        <form id="kickForm">
+          <div style="display:grid;grid-template-columns:1fr 2fr auto;gap:12px;align-items:end">
+            <label class="field">
+              <span class="label">设备码 / 配对码</span>
+              <input id="k_pin" class="input" placeholder="8 位数字" maxlength="8">
+            </label>
+            <label class="field">
+              <span class="label">下线原因（客户端会显示）</span>
+              <input id="k_reason" class="input" placeholder="例如：检测到多设备共享 / 违规使用">
+            </label>
+            <button type="submit" class="btn btn-primary">强制下线</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th style="width:110px">配对码</th>
+              <th style="width:80px">版本</th>
+              <th style="width:120px">客户端</th>
+              <th style="width:130px">IP</th>
+              <th style="width:120px">最后心跳</th>
+              <th style="width:110px">授权</th>
+              <th>状态 / 原因</th>
+              <th style="width:170px">操作</th>
+            </tr>
+          </thead>
+          <tbody id="onlineRows"></tbody>
         </table>
       </div>
     </section>
@@ -375,38 +492,97 @@ require __DIR__ . '/../../app/bootstrap.php';
 
       <div class="group">
         <div class="group-head">
-          <h3>云端规则库</h3>
+          <h3>下发状态</h3>
           <p>规则只存服务器，客户端凭有效卡密加密下载，解析后仅在内存中使用</p>
         </div>
-        <div class="hint" id="r_now">—</div>
-        <form id="rulesForm">
-          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
-            <input type="file" id="r_file" accept=".txt,.conf,.list,.rules,.csv,text/plain" hidden>
-            <button type="button" class="btn btn-primary" id="r_pick">导入 txt（自动适配）</button>
-            <button type="button" class="btn" id="r_fix">把下面内容自动适配</button>
-            <span class="muted" id="r_import" style="font-size:12px">
-              支持 #IP/#DOMAIN/#PORT 分段、hosts、dnsmasq、AdGuard、纯 IP/CIDR、带端口
-            </span>
+        <div class="rows">
+          <div class="row">
+            <div class="row-label">
+              <div class="t">当前下发</div>
+              <div class="d" id="rs_now">还没有下发任何规则</div>
+            </div>
+            <div class="row-control" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">
+              <button type="button" class="btn" id="rs_all_on">全部下发</button>
+              <button type="button" class="btn" id="rs_all_off">全部停用</button>
+              <button type="button" class="btn" id="rs_apply">重新应用</button>
+            </div>
           </div>
-          <div style="display:grid;grid-template-columns:1fr 2fr;gap:0 16px">
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head">
+          <h3>规则集</h3>
+          <p>勾选哪几套就要下发哪几套，客户端拿到的就是勾选的合集</p>
+        </div>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead><tr>
+              <th style="width:70px">下发</th>
+              <th>规则集名称</th>
+              <th style="width:130px">版本</th>
+              <th style="width:150px">下发版本</th>
+              <th style="width:200px">规则量</th>
+              <th style="width:90px">大小</th>
+              <th style="width:130px">更新时间</th>
+              <th style="width:180px">操作</th>
+            </tr></thead>
+            <tbody id="rsRows"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head">
+          <h3 id="rs_form_title">新建规则集</h3>
+          <p>导入 txt 或者直接把规则贴进来，填个名字就能存</p>
+        </div>
+        <form id="rsForm">
+          <input type="hidden" id="rs_id" value="0">
+          <div style="display:grid;grid-template-columns:2fr 1fr 2fr;gap:0 16px">
             <label class="field">
-              <span class="label">规则版本</span>
-              <input id="r_version" class="input" placeholder="2026.11.17">
+              <span class="label">规则集名称</span>
+              <input id="rs_name" class="input" placeholder="例如：广告域名拦截">
+            </label>
+            <label class="field">
+              <span class="label">版本（可留空）</span>
+              <input id="rs_version" class="input" placeholder="留空自动生成">
             </label>
             <label class="field">
               <span class="label">说明</span>
-              <input id="r_note" class="input" placeholder="本次更新了什么">
+              <input id="rs_note" class="input" placeholder="这套规则是干什么的">
             </label>
           </div>
           <label class="field">
             <span class="label">规则内容</span>
-            <textarea id="r_content" class="textarea"
-              style="min-height:240px;font-family:ui-monospace,Menlo,monospace;font-size:12px"
-              placeholder="#IP&#10;1.2.3.4&#10;#DOMAIN&#10;example.com&#10;#PORT&#10;80"></textarea>
+            <textarea id="rs_content" class="textarea"
+              style="min-height:220px;font-family:ui-monospace,Menlo,monospace;font-size:12px"
+              placeholder="#IP&#10;1.2.3.4&#10;#DOMAIN&#10;example.com&#10;#PORT&#10;80&#10;#DIRECT&#10;pass.example.com"></textarea>
           </label>
-          <div class="err" id="r_err"></div>
-          <div style="margin-top:12px">
-            <button type="submit" class="btn btn-primary" id="r_save">保存并加密下发</button>
+          <div class="rows">
+            <div class="row">
+              <div class="row-label"><div class="t">保存后参与下发</div><div class="d">勾上就立刻进下发合集，客户端马上拿到</div></div>
+              <div class="row-control"><input type="checkbox" id="rs_enabled" checked></div>
+            </div>
+            <div class="row">
+              <div class="row-label"><div class="t">下发给哪些版本</div><div class="d">不勾 = 全部版本都下发；FREE &lt; BETA &lt; PRO &lt; MAX，每张卡密只拿自己那层的规则</div></div>
+              <div class="row-control" style="display:flex;gap:14px;flex-wrap:wrap">
+                <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" class="rs-tier" value="free">FREE</label>
+                <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" class="rs-tier" value="beta">BETA</label>
+                <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" class="rs-tier" value="pro">PRO</label>
+                <label style="display:flex;gap:6px;align-items:center"><input type="checkbox" class="rs-tier" value="max">MAX</label>
+              </div>
+            </div>
+          </div>
+          <div class="err" id="rs_err"></div>
+          <div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button type="submit" class="btn btn-primary" id="rs_save">保存规则集</button>
+            <button type="button" class="btn" id="rs_import">导入 TXT</button>
+            <input type="file" id="rs_file" accept=".txt,.csv,.list,text/plain" hidden>
+            <button type="button" class="btn" id="rs_new">清空新建</button>
+            <span class="muted" id="rs_hint" style="font-size:12px;line-height:1.5">
+              支持 .txt / .csv，单套最大 2MB；没分节的清单会自动归类。可写 #IP / #DOMAIN / #PORT / #DIRECT（放行），放行优先于拦截
+            </span>
           </div>
         </form>
       </div>
@@ -512,6 +688,22 @@ require __DIR__ . '/../../app/bootstrap.php';
   </main>
 </div>
 
+
+<!-- ══════════════ 卡密详情 ══════════════ -->
+<div class="cd" id="cd" hidden>
+  <div class="cd-mask" data-cd-close></div>
+  <section class="cd-panel" role="dialog" aria-modal="true" aria-label="卡密详情">
+    <header class="cd-head">
+      <div>
+        <div class="cd-code mono" id="cdCode">—</div>
+        <div class="cd-meta" id="cdMeta">—</div>
+      </div>
+      <button class="btn-text" data-cd-close>关闭</button>
+    </header>
+    <div class="cd-body" id="cdBody"></div>
+  </section>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -532,26 +724,50 @@ function toast(msg, isErr) {
   t._h = setTimeout(() => { t.className = 'toast'; }, 2600);
 }
 
-async function api(path, opt = {}) {
-  const headers = { 'Content-Type': 'application/json' };
+async function refreshCsrf() {
+  try {
+    const r = await fetch('/api/admin/csrf', { credentials: 'same-origin' });
+    if (!r.ok) return false;
+    const j = await r.json();
+    if (j && j.ok && j.csrf) { CSRF = j.csrf; return true; }
+  } catch (e) {}
+  return false;
+}
+
+async function api(path, opt = {}, _retried = false) {
+  const isForm = (typeof FormData !== 'undefined') && (opt.body instanceof FormData);
+  const isWrite = (opt.method || 'GET').toUpperCase() !== 'GET';
+  if (isWrite && !CSRF) await refreshCsrf();
+
+  const headers = {};
+  if (!isForm) headers['Content-Type'] = 'application/json';
   if (CSRF) headers['X-CSRF'] = CSRF;
+
+  let body;
+  if (isForm) body = opt.body;
+  else if (opt.body) body = JSON.stringify(CSRF ? Object.assign({ _csrf: CSRF }, opt.body) : opt.body);
+
   let res;
   try {
     res = await fetch('/api/' + path, {
       method: opt.method || 'GET',
       headers,
       credentials: 'same-origin',
-      body: opt.body ? JSON.stringify(opt.body) : undefined,
+      body,
     });
   } catch (e) {
     return { ok: false, error: 'network' };
+  }
+  if (res.status === 419 && !_retried && path !== 'admin/csrf') {
+    if (await refreshCsrf()) return api(path, opt, true);
   }
   if (res.status === 401) { showAuth(); return { ok: false, error: 'unauthenticated' }; }
   try { return await res.json(); } catch (e) { return { ok: false, error: 'bad_response' }; }
 }
 
 const ts = (n) => {
-  if (!n) return '—';
+  /* 服务端 SQLite 出来的整数是字符串（"0"），这里一并按无效处理，别显示成 1970 年 */
+  if (!n || +n <= 0) return '—';
   const d = new Date(n * 1000);
   const p = (x) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
@@ -576,6 +792,8 @@ const ICONS = {
 };
 function paintIcons() {
   $$('.nav-item').forEach(el => {
+    // 先清掉已有图标，避免重复调用时图标叠加
+    el.querySelectorAll('svg').forEach(s => s.remove());
     const n = el.dataset.icon;
     if (!n || !ICONS[n]) return;
     el.insertAdjacentHTML('afterbegin',
@@ -616,14 +834,15 @@ $('#logout').addEventListener('click', async () => {
 function switchView(v) {
   STATE.view = v;
   $$('.nav-item').forEach(b => b.classList.toggle('active', b.dataset.view === v));
-  ['overview', 'cards', 'pins', 'notice', 'versions', 'logs', 'settings'].forEach(k => {
+  ['overview', 'cards', 'online', 'pins', 'notice', 'versions', 'logs', 'settings'].forEach(k => {
     $('#view-' + k).hidden = (k !== v);
   });
   if (v === 'overview') loadOverview();
+  if (v === 'online') loadOnline();
   if (v === 'cards') loadCards();
   if (v === 'pins') loadPins();
   if (v === 'notice') loadNotice();
-  if (v === 'versions') { loadVersions(); loadRules(); }
+  if (v === 'versions') { loadVersions(); loadRuleSets(); }
   if (v === 'logs') loadLogs();
   if (v === 'settings') loadSettings();
 }
@@ -679,12 +898,13 @@ $('#genForm').addEventListener('submit', async (e) => {
       note: $('#g_note').value.trim(),
       plan: $('#g_plan').value,
       charset: $('#g_charset').value,
+      tier: $('#g_tier').value,
     },
   });
   btn.disabled = false;
   if (!r.ok) { $('#genErr').textContent = '生成失败'; return; }
   $('#genOut').hidden = false;
-  $('#genSummary').textContent = `已生成 ${r.created} 张 · ${days} 天 · 批次 ${batch}`;
+  $('#genSummary').textContent = `已生成 ${r.created} 张 · ${days} 天 · ${String(r.tier || '').toUpperCase()} · 批次 ${batch}`;
   $('#genCodes').value = (r.codes || []).join('\n');
   toast('已生成 ' + r.created + ' 张卡密');
   loadCards();
@@ -734,22 +954,27 @@ async function loadCards() {
   const STATE_TXT = { 0: ['未使用', 'state-0'], 1: ['已兑换', 'state-1'], 2: ['已作废', 'state-2'] };
   $('#rows').innerHTML = rows.length ? rows.map(c => {
     const s = STATE_TXT[c.status] || ['未知', 'muted'];
-    const tip = [c.bound_pin ? '绑定 ' + c.bound_pin : '', c.note || ''].filter(Boolean).join(' · ');
+    const tip = [c.bound_pin ? '绑定 ' + c.bound_pin : '', c.note || ''] .filter(Boolean).join(' · ');
+    const tier = String(c.tier || 'pro').toUpperCase();
+    const ban = (c.status === 2 && c.ban_reason)
+      ? `<div class="muted" style="font-size:12px;margin-top:3px;color:#c0392b">封禁：${esc(c.ban_reason)}</div>` : '';
     return `<tr>
       <td class="col-check"><input type="checkbox" data-id="${c.id}"></td>
-      <td class="mono" title="${esc(tip)}">${esc(c.code)}</td>
+      <td class="mono" title="${esc(tip)}">${esc(c.code)}${ban}</td>
       <td class="muted">${esc(c.batch || '—')}</td>
       <td class="muted">${dur(c.duration_sec)}</td>
       <td class="${s[1]}">${s[0]}</td>
+      <td>${tierBadge(c.tier)}</td>
       <td class="muted num">${c.expire_at ? ts(c.expire_at) : '—'}</td>
       <td>
+        <button class="btn btn-sm" data-act="detail" data-id="${c.id}">详情</button>
         <button class="btn btn-sm" data-act="extend" data-id="${c.id}">延期</button>
         <button class="btn btn-sm" data-act="toggle" data-id="${c.id}" data-status="${c.status}">${c.status === 2 ? '解封' : '作废'}</button>
         ${c.bound_pin ? `<button class="btn btn-sm" data-act="unbind" data-id="${c.id}">解绑</button>` : ''}
         <button class="btn btn-sm btn-danger" data-act="delete" data-id="${c.id}">删除</button>
       </td>
     </tr>`;
-  }).join('') : `<tr><td colspan="7" class="empty">没有符合条件的数据</td></tr>`;
+  }).join('') : `<tr><td colspan="8" class="empty">没有符合条件的数据</td></tr>`;
 
   $$('#rows input[type=checkbox]').forEach(cb => cb.addEventListener('change', () => {
     const id = +cb.dataset.id;
@@ -780,6 +1005,7 @@ $('#checkAll').addEventListener('change', (e) => {
 async function cardAction(btn) {
   const id = +btn.dataset.id;
   const act = btn.dataset.act;
+  if (act === 'detail') { openCardDetail(id); return; }
   if (act === 'extend') {
     const d = prompt('延期天数（负数表示缩短）', '7');
     if (d === null || d === '' || isNaN(+d)) return;
@@ -789,9 +1015,15 @@ async function cardAction(btn) {
   }
   if (act === 'toggle') {
     const to = +btn.dataset.status === 2 ? 0 : 2;
-    const r = await api('admin/cards/status', { method: 'POST', body: { id, status: to } });
+    let reason = '';
+    if (to === 2) {
+      reason = prompt('封禁原因（会显示在后台，并下发到客户端提示用户）', '违规使用') ;
+      if (reason === null) return;
+      if (!reason.trim()) reason = '管理员封禁';
+    }
+    const r = await api('admin/cards/status', { method: 'POST', body: { id, status: to, reason } });
     if (!r.ok) { toast('操作失败', true); return; }
-    toast(to === 2 ? '已作废' : '已解封'); loadCards(); return;
+    toast(to === 2 ? '已封禁' : '已解封'); loadCards(); return;
   }
   if (act === 'unbind') {
     if (!confirm('解绑后这张卡密可以在别的设备上继续使用（剩余时长不变），确认？')) return;
@@ -814,6 +1046,11 @@ $$('[data-bulk]').forEach(b => b.addEventListener('click', async () => {
   if (action === 'delete' && !confirm(`确认删除选中的 ${ids.length} 张卡密？`)) return;
   const body = { ids, action };
   if (action === 'extend') body.days = 7;
+  if (action === 'ban') {
+    const reason = prompt('批量封禁原因（会显示在后台并下发到客户端）', '违规使用');
+    if (reason === null) return;
+    body.reason = reason.trim() || '管理员封禁';
+  }
   const r = await api('admin/cards/bulk', { method: 'POST', body });
   if (!r.ok) { toast('批量操作失败', true); return; }
   toast(`已处理 ${r.done} 项`);
@@ -857,6 +1094,63 @@ async function loadPins() {
     toast('已解除授权'); loadPins();
   }));
 }
+
+/* ═══════════ 在线设备 ═══════════ */
+async function loadOnline() {
+  const r = await api('admin/online');
+  if (!r.ok) return;
+  const rows = r.rows || [];
+  $('#onlineRows').innerHTML = rows.length ? rows.map(o => {
+    const dead = o.kicked;
+    const state = dead
+      ? `<span style="color:#c0392b">已下线：${esc(o.kick_reason || '管理员操作')}</span>`
+      : (o.authorized ? '<span class="state-1">在线</span>' : '<span class="muted">在线但未授权</span>');
+    return `<tr>
+      <td class="mono">${esc(o.pin)}</td>
+      <td class="mono">${esc(o.tier_label || '—')}</td>
+      <td class="muted">${esc(o.app_ver || '—')}</td>
+      <td class="mono muted">${esc(o.ip || '—')}</td>
+      <td class="muted num">${o.online_s < 60 ? o.online_s + ' 秒前' : Math.floor(o.online_s / 60) + ' 分钟前'}</td>
+      <td class="num ${o.authorized ? 'state-1' : 'muted'}">${o.authorized ? '有效' : '—'}</td>
+      <td>${state}${o.code ? `<div class="muted" style="font-size:12px;margin-top:2px">卡密 ${esc(o.code)}</div>` : ''}</td>
+      <td>
+        ${dead
+          ? `<button class="btn btn-sm" data-unkick="${esc(o.pin)}">解除下线</button>`
+          : `<button class="btn btn-sm btn-danger" data-kick="${esc(o.pin)}">强制下线</button>`}
+      </td>
+    </tr>`;
+  }).join('') : `<tr><td colspan="8" class="empty">现在没有在线设备</td></tr>`;
+
+  $$('#onlineRows [data-kick]').forEach(b => b.addEventListener('click', async () => {
+    const pin = b.dataset.kick;
+    const reason = prompt(`让设备 ${pin} 强制下线，原因（客户端会显示）：`, '检测到多设备共享');
+    if (reason === null) return;
+    const r2 = await api('admin/kick', { method: 'POST', body: { pin, reason: reason.trim() } });
+    if (!r2.ok) { toast('操作失败：' + (r2.error || 'unknown'), true); return; }
+    toast('已下发下线指令，客户端下次心跳（1 分钟内）生效');
+    loadOnline();
+  }));
+
+  $$('#onlineRows [data-unkick]').forEach(b => b.addEventListener('click', async () => {
+    const pin = b.dataset.unkick;
+    const r2 = await api('admin/unkick', { method: 'POST', body: { pin } });
+    if (!r2.ok) { toast('操作失败', true); return; }
+    toast('已解除，设备可以重新连接');
+    loadOnline();
+  }));
+}
+
+$('#kickForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const pin = $('#k_pin').value.trim();
+  if (!/^\d{8}$/.test(pin)) { toast('设备码必须是 8 位数字', true); return; }
+  const reason = $('#k_reason').value.trim() || '管理员强制下线';
+  const r = await api('admin/kick', { method: 'POST', body: { pin, reason } });
+  if (!r.ok) { toast('操作失败：' + (r.error || 'unknown'), true); return; }
+  toast('已下发下线指令');
+  $('#k_pin').value = '';
+  loadOnline();
+});
 
 /* ═══════════ 公告 ═══════════ */
 async function loadNotice() {
@@ -969,91 +1263,230 @@ $('#verForm').addEventListener('submit', async (e) => {
 
 $('#v_reset').addEventListener('click', resetVerForm);
 
-async function loadRules() {
-  const r = await api('admin/rules');
+/* ---- 规则集：可以存多套，勾选哪几套就下发哪几套 ---- */
+let RULE_SETS = [];
+
+const rsBytes = (n) => {
+  n = +n || 0;
+  if (n < 1024) return n + ' B';
+  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1048576).toFixed(2) + ' MB';
+};
+const rsCount = (v) => `${v.ip_count} IP / ${v.domain_count} 域名 / ${v.port_count} 端口`;
+
+function rsReset() {
+  $('#rs_id').value = '0';
+  $('#rs_name').value = '';
+  $('#rs_version').value = '';
+  $('#rs_note').value = '';
+  $('#rs_content').value = '';
+  $('#rs_enabled').checked = true;
+  $$('.rs-tier').forEach(cb => { cb.checked = false; });
+  $('#rs_err').textContent = '';
+  $('#rs_hint').textContent = '支持 .txt / .csv，单套最大 2MB；没分节的清单会自动归类。可写 #IP / #DOMAIN / #PORT / #DIRECT（放行），放行优先于拦截';
+  $('#rs_form_title').textContent = '新建规则集';
+  $('#rs_save').textContent = '保存规则集';
+}
+
+async function loadRuleSets() {
+  const r = await api('admin/rulesets');
   if (!r.ok) return;
-  const c = r.current;
-  if (c) {
-    $('#r_now').textContent = `当前版本 ${c.version} · ${c.ip_count} IP / ${c.domain_count} 域名 / ${c.port_count} 端口 · ${c.bytes} 字节 · ${ts(c.updated_at)}`;
-    $('#r_version').value = c.version;
-    $('#r_note').value = c.note || '';
-    $('#r_content').value = r.content || '';
+  RULE_SETS = r.rows || [];
+  const s = r.summary || {};
+  const p = s.pack;
+
+  if (p) {
+    const names = (s.sets && s.sets.length) ? s.sets.join(' · ') : '未命名';
+    $('#rs_now').textContent = `下发 ${s.set_count || 0} 套（${names}）· 版本 ${p.version} · ${p.ip_count} IP / ${p.domain_count} 域名 / ${p.port_count} 端口 · ${rsBytes(p.bytes)} · ${ts(p.updated_at)}`;
+  } else if ((s.total || 0) > 0) {
+    $('#rs_now').textContent = '当前一套都没勾，客户端会提示规则加载失败';
   } else {
-    $('#r_now').textContent = '还没有下发任何规则，客户端会提示规则加载失败';
+    $('#rs_now').textContent = '还没有规则集，在下面新建一套就能下发';
   }
+
+  $('#rsRows').innerHTML = RULE_SETS.length ? RULE_SETS.map(x => `<tr>
+      <td><input type="checkbox" data-rs-toggle="${x.id}" ${x.enabled == 1 ? 'checked' : ''}></td>
+      <td>${esc(x.name)}${x.note ? `<div class="muted" style="font-size:12px;margin-top:2px">${esc(x.note)}</div>` : ''}</td>
+      <td class="mono muted">${esc(x.version || '—')}</td>
+      <td class="mono muted">${(x.tiers || '').trim() ? esc(String(x.tiers).toUpperCase().replace(/,/g, ' / ')) : '全部'}</td>
+      <td class="muted num">${rsCount(x)}</td>
+      <td class="muted num">${rsBytes(x.bytes)}</td>
+      <td class="muted num">${ts(x.updated_at)}</td>
+      <td>
+        <button class="btn btn-sm" data-rs-up="${x.id}" title="上移">↑</button>
+        <button class="btn btn-sm" data-rs-down="${x.id}" title="下移">↓</button>
+        <button class="btn btn-sm" data-rs-edit="${x.id}">编辑</button>
+        <button class="btn btn-sm btn-danger" data-rs-del="${x.id}">删除</button>
+      </td>
+    </tr>`).join('') : `<tr><td colspan="8" class="empty">还没有规则集</td></tr>`;
+
+  /* 勾选 = 这套参与下发，改完立刻重算快照 */
+  $$('#rsRows [data-rs-toggle]').forEach(cb => cb.addEventListener('change', async () => {
+    const id = +cb.dataset.rsToggle;
+    const on = cb.checked;
+    cb.disabled = true;
+    const r2 = await api('admin/rulesets/toggle', { method: 'POST', body: { id, enabled: on } });
+    cb.disabled = false;
+    if (!r2.ok) {
+      cb.checked = !on;
+      toast('设置失败：' + (r2.error || 'unknown'), true);
+      return;
+    }
+    const a = r2.applied || {};
+    if (a.ok) toast(`${on ? '已加入' : '已移出'}下发 · 现在共 ${a.set_count} 套`);
+    else toast(on ? '已加入下发' : '已移出下发（现在一套都没有，不下发）', !on);
+    loadRuleSets();
+  }));
+
+  $$('#rsRows [data-rs-edit]').forEach(b => b.addEventListener('click', async () => {
+    const r2 = await api('admin/rulesets/get', { method: 'POST', body: { id: +b.dataset.rsEdit } });
+    if (!r2.ok || !r2.row) { toast('读取失败', true); return; }
+    const v = r2.row;
+    $('#rs_id').value = v.id;
+    $('#rs_name').value = v.name || '';
+    $('#rs_version').value = v.version || '';
+    $('#rs_note').value = v.note || '';
+    $('#rs_content').value = v.content || '';
+    $('#rs_enabled').checked = v.enabled == 1;
+    const vt = String(v.tiers || '').split(',').map(x => x.trim()).filter(Boolean);
+    $$('.rs-tier').forEach(cb => { cb.checked = vt.length === 0 || vt.includes(cb.value); });
+    $('#rs_err').textContent = '';
+    $('#rs_hint').textContent = `正在编辑「${v.name}」· ${rsCount(v)}`;
+    $('#rs_form_title').textContent = '编辑规则集';
+    $('#rs_save').textContent = '保存修改';
+    $('#rs_content').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    toast('已载入，改完点保存');
+  }));
+
+  const moveSet = async (id, dir) => {
+    const r2 = await api('admin/rulesets/sort', { method: 'POST', body: { id, dir } });
+    if (!r2.ok) { toast('调整失败：' + (r2.error || 'unknown'), true); return; }
+    if (r2.moved === false) { toast(dir === 'up' ? '已经在最前面了' : '已经在最后面了'); return; }
+    toast(`顺序已调整 · 第 ${r2.position} 套`);
+    loadRuleSets();
+  };
+
+  $$('#rsRows [data-rs-up]').forEach(b => b.addEventListener('click', () => moveSet(+b.dataset.rsUp, 'up')));
+  $$('#rsRows [data-rs-down]').forEach(b => b.addEventListener('click', () => moveSet(+b.dataset.rsDown, 'down')));
+
+  $$('#rsRows [data-rs-del]').forEach(b => b.addEventListener('click', async () => {
+    const v = RULE_SETS.find(x => String(x.id) === b.dataset.rsDel);
+    if (!confirm(`删除规则集「${v ? v.name : b.dataset.rsDel}」？删了就找不回来`)) return;
+    const r2 = await api('admin/rulesets/delete', { method: 'POST', body: { id: +b.dataset.rsDel } });
+    if (!r2.ok) { toast('删除失败：' + (r2.error || 'unknown'), true); return; }
+    toast('已删除');
+    loadRuleSets();
+  }));
 }
 
-/* ── 规则导入：任意格式 → 标准三段式 ── */
-function applyImported(r, name) {
-  $('#r_content').value = r.text || '';
-  const d = new Date();
-  const p2 = (x) => String(x).padStart(2, '0');
-  $('#r_version').value = `${d.getFullYear()}.${p2(d.getMonth() + 1)}.${p2(d.getDate())}`;
-  const parts = [];
-  parts.push(`${r.ips} IP`);
-  parts.push(`${r.domains} 域名`);
-  if (r.direct) parts.push(`${r.direct} 放行`);
-  parts.push(`${r.ports} 端口`);
-  $('#r_note').value = (name ? `导入 ${name}：` : '导入：') + parts.join(' / ');
-  $('#r_import').textContent =
-    `已适配 ${r.ips} IP / ${r.domains} 域名 / ${r.ports} 端口` +
-    (r.skipped ? ` · 跳过 ${r.skipped} 行` : '') +
-    ` · 原文件 ${r.lines} 行 → ${(r.text || '').split('\n').length} 行，确认后点保存`;
-}
-
-async function importRulesText(text, name) {
-  const r = await api('admin/rules/import', { method: 'POST', body: { content: text } });
-  if (!r.ok) {
-    $('#r_import').textContent = r.message || ('导入失败：' + (r.error || 'unknown'));
-    toast(r.message || '导入失败', true);
-    return false;
-  }
-  applyImported(r, name);
-  toast(`已适配 ${r.ips} IP / ${r.domains} 域名 / ${r.ports} 端口，确认后点保存`);
-  return true;
-}
-
-$('#r_pick').addEventListener('click', () => $('#r_file').click());
-
-$('#r_file').addEventListener('change', async (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  const btn = $('#r_pick');
-  const old = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '解析中…';
-  try {
-    const text = await file.text();
-    await importRulesText(text, file.name);
-  } catch (err) {
-    toast('读文件失败', true);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = old;
-    e.target.value = '';
-  }
-});
-
-$('#r_fix').addEventListener('click', async () => {
-  const text = $('#r_content').value;
-  if (!text.trim()) { toast('先把规则内容粘进去', true); return; }
-  await importRulesText(text, '');
-});
-
-$('#rulesForm').addEventListener('submit', async (e) => {
+$('#rsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const body = {
-    version: $('#r_version').value.trim(),
-    note: $('#r_note').value.trim(),
-    content: $('#r_content').value,
+    id: +$('#rs_id').value || 0,
+    name: $('#rs_name').value.trim(),
+    version: $('#rs_version').value.trim(),
+    note: $('#rs_note').value.trim(),
+    content: $('#rs_content').value,
+    enabled: $('#rs_enabled').checked,
+    tiers: $$('.rs-tier').filter(cb => cb.checked).map(cb => cb.value).join(','),
   };
-  if (!body.version) { $('#r_err').textContent = '请填写规则版本'; return; }
-  if (body.content.trim().length < 20) { $('#r_err').textContent = '规则内容太短'; return; }
-  $('#r_err').textContent = '';
-  const r = await api('admin/rules/save', { method: 'POST', body });
-  if (!r.ok) { $('#r_err').textContent = '保存失败：' + (r.error || 'unknown'); return; }
-  toast(`已保存：${r.ip} IP / ${r.domain} 域名 / ${r.port} 端口`);
-  loadRules();
+  if (!body.name) { $('#rs_err').textContent = '请填写规则集名称'; return; }
+  if (body.content.trim().length < 20) { $('#rs_err').textContent = '规则内容太短'; return; }
+  $('#rs_err').textContent = '';
+  $('#rs_save').disabled = true;
+  const r = await api('admin/rulesets/save', { method: 'POST', body });
+  $('#rs_save').disabled = false;
+
+  if (!r.ok) {
+    const map = {
+      bad_name: '名称不合法',
+      name_too_long: '名称太长（最多 60 字）',
+      name_exists: '已经有同名规则集',
+      empty_rules: '规则内容太短',
+      too_large: '单套超过 2MB，请拆分',
+      too_many_sets: '规则集数量已达上限 50 套',
+      bad_version: '版本号太长（最多 32 字符）',
+      server_error: '服务器开小差了',
+    };
+    $('#rs_err').textContent = '保存失败：' + (map[r.error] || r.error || 'unknown');
+    return;
+  }
+
+  let msg = `${r.replaced ? '已覆盖同名规则集' : '已保存'}：${r.name} · ${r.ip} IP / ${r.domain} 域名 / ${r.port} 端口`;
+  const a = r.applied;
+  if (a && a.ok) msg += ` · 已下发 ${a.set_count} 套`;
+  else if (a && a.error === 'no_enabled_sets') msg += ' · 当前没有启用规则，不下发';
+  toast(msg);
+  rsReset();
+  loadRuleSets();
+});
+
+$('#rs_new').addEventListener('click', rsReset);
+
+$('#rs_all_on').addEventListener('click', async () => {
+  const ids = RULE_SETS.map(x => +x.id);
+  if (!ids.length) { toast('还没有规则集', true); return; }
+  const r = await api('admin/rulesets/toggle', { method: 'POST', body: { ids } });
+  if (!r.ok) { toast('操作失败：' + (r.error || 'unknown'), true); return; }
+  toast(`已全部纳入下发 · 共 ${r.applied && r.applied.set_count ? r.applied.set_count : ids.length} 套`);
+  loadRuleSets();
+});
+
+$('#rs_all_off').addEventListener('click', async () => {
+  if (!confirm('停用全部规则集？客户端将拿不到任何规则')) return;
+  const r = await api('admin/rulesets/toggle', { method: 'POST', body: { ids: [] } });
+  if (!r.ok) { toast('操作失败：' + (r.error || 'unknown'), true); return; }
+  toast('已全部停用，当前不下发规则');
+  loadRuleSets();
+});
+
+$('#rs_apply').addEventListener('click', async () => {
+  const r = await api('admin/rulesets/apply', { method: 'POST' });
+  if (!r.ok) {
+    if (r.error === 'no_enabled_sets') { toast('一套都没勾，没有可下发的内容', true); return; }
+    toast('应用失败：' + (r.error || 'unknown'), true);
+    return;
+  }
+  toast(`已应用：${r.set_count} 套 · ${rsBytes(r.bytes)}`);
+  loadRuleSets();
+});
+
+/* ---- 规则集：从 TXT / CSV 导入到编辑框 ---- */
+$('#rs_import').addEventListener('click', () => $('#rs_file').click());
+
+$('#rs_file').addEventListener('change', async () => {
+  const f = $('#rs_file').files && $('#rs_file').files[0];
+  if (!f) return;
+  const hint = $('#rs_hint');
+  if (f.size > 2 * 1024 * 1024) {
+    hint.textContent = '文件超过 2MB，请拆分后再导入';
+    toast('文件太大', true);
+    $('#rs_file').value = '';
+    return;
+  }
+  hint.textContent = '正在读取…';
+  const fd = new FormData();
+  fd.append('file', f);
+  const r = await api('admin/rules/import', { method: 'POST', body: fd });
+  $('#rs_file').value = '';
+  if (!r.ok) {
+    hint.textContent = '读取失败，换一个 txt 再试';
+    toast('导入失败：' + (r.error || 'unknown'), true);
+    return;
+  }
+  $('#rs_content').value = r.content || '';
+  /* 没填名字就拿文件名兜底，省得每次都要打一遍 */
+  if (!$('#rs_name').value.trim()) {
+    $('#rs_name').value = f.name.replace(/\.[^.]+$/, '').slice(0, 60);
+  }
+  const auto = r.auto_grouped ? '（已自动按类型归类）' : '';
+  hint.textContent = `已载入 ${f.name} · ${r.bytes} 字节 · IP ${r.ip} / 域名 ${r.domain} / 端口 ${r.port}${auto}`;
+  if ((r.ip + r.domain + r.port) === 0) {
+    hint.textContent += ' · 没识别到规则，检查一下文件内容';
+    toast('没识别到规则', true);
+  } else {
+    toast('已载入，确认名称后点保存');
+  }
 });
 
 /* ═══════════ 日志 ═══════════ */
@@ -1143,6 +1576,194 @@ $$('[data-danger]').forEach(b => b.addEventListener('click', async () => {
   toast(`已清理 ${r.affected} 条`);
   if (action === 'clear_logs') loadLogs(); else loadCards();
 }));
+
+
+/* ═══════════ 卡密详情 ═══════════ */
+const TIER_LABEL = { free: 'FREE', beta: 'BETA', pro: 'PRO', max: 'MAX' };
+
+function tierBadge(t) {
+  let k = String(t || 'pro').toLowerCase();
+  if (!TIER_LABEL[k]) k = 'pro';
+  return `<span class="tier tier-${k}">${TIER_LABEL[k]}</span>`;
+}
+
+function remainText(sec) {
+  sec = Math.max(0, +sec || 0);
+  if (!sec) return '—';
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d} 天 ${h} 小时`;
+  if (h > 0) return `${h} 小时 ${m} 分`;
+  return `${m} 分钟`;
+}
+
+let CD_ID = 0;
+
+async function openCardDetail(id) {
+  const r = await api('admin/cards/detail?id=' + id);
+  if (!r.ok || !r.card) { toast('读取详情失败', true); return; }
+  CD_ID = id;
+  renderCardDetail(r.card);
+  $('#cd').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
+function closeCardDetail() {
+  $('#cd').hidden = true;
+  document.body.style.overflow = '';
+  CD_ID = 0;
+}
+
+const cdKv = (k, v) => `<dt>${k}</dt><dd>${v}</dd>`;
+
+function renderCardDetail(c) {
+  const ST = { 0: ['未使用', 'state-0'], 1: ['已兑换', 'state-1'], 2: ['已作废', 'state-2'] };
+  const st = ST[c.status] || ['未知', ''];
+  const p = c.pin_info || null;
+
+  $('#cdCode').textContent = c.code;
+  $('#cdMeta').innerHTML = `${tierBadge(c.tier)}<span class="${st[1]}">${st[0]}</span>` +
+    (c.batch ? `<span>批次 ${esc(c.batch)}</span>` : '<span>无批次</span>');
+
+  let html = '';
+
+  /* 授权 */
+  html += `<div class="cd-sec"><h4>授权</h4><dl class="cd-kv">
+    ${cdKv('等级', tierBadge(c.tier))}
+    ${cdKv('状态', `<span class="${st[1]}">${st[0]}</span>`)}
+    ${cdKv('时长', dur(c.duration_sec))}
+    ${cdKv('到期时间', c.expire_at
+        ? `${ts(c.expire_at)}（${c.seconds_left > 0 ? '剩 ' + remainText(c.seconds_left) : '已到期'}）`
+        : '—')}
+    ${cdKv('兑换时间', c.redeemed_at ? ts(c.redeemed_at) : '未兑换')}
+    ${cdKv('创建时间', c.created_at ? ts(c.created_at) : '—')}
+    ${cdKv('备注', c.note ? esc(c.note) : '—')}
+  </dl>
+  <div class="cd-actions">
+    <select class="select sm" id="cdTier" style="width:118px">
+      ${['free', 'beta', 'pro', 'max'].map(t =>
+        `<option value="${t}"${t === c.tier ? ' selected' : ''}>${TIER_LABEL[t]}</option>`).join('')}
+    </select>
+    <button class="btn btn-sm" id="cdTierSave">改等级</button>
+  </div></div>`;
+
+  /* 绑定设备 */
+  if (p) {
+    html += `<div class="cd-sec"><h4>绑定设备</h4><dl class="cd-kv">
+      ${cdKv('配对码', `<span class="mono">${esc(p.pin)}</span>`)}
+      ${cdKv('在线', p.online ? '<span class="state-1">在线</span>' : '<span class="muted">离线</span>')}
+      ${cdKv('最近心跳', p.last_beat ? ts(p.last_beat) : '—')}
+      ${cdKv('客户端', p.app_ver ? esc(p.app_ver) : '—')}
+      ${cdKv('IP', esc(p.ip || c.bound_ip || '—'))}
+      ${cdKv('授权窗口', p.authorized_until
+          ? `${ts(p.authorized_until)}（${p.authorized ? '有效' : '已过期'}）` : '—')}
+      ${cdKv('设备指纹', c.bound_dev
+          ? `<span class="mono">${esc(String(c.bound_dev).slice(0, 20))}${String(c.bound_dev).length > 20 ? '…' : ''}</span>`
+          : '—')}
+      ${cdKv('兑换次数', String(p.redeem_count == null ? 0 : p.redeem_count))}
+      ${cdKv('强制下线', p.kicked ? `<span class="state-2">${esc(p.kick_reason || '已下线')}</span>` : '否')}
+    </dl></div>`;
+  } else {
+    html += `<div class="cd-sec"><h4>绑定设备</h4><dl class="cd-kv">
+      ${cdKv('状态', c.bound_pin ? `<span class="mono">${esc(c.bound_pin)}</span>` : '未绑定任何设备')}
+      ${c.bound_ip ? cdKv('IP', esc(c.bound_ip)) : ''}
+    </dl></div>`;
+  }
+
+  /* 封禁 */
+  if (c.status === 2 || c.ban_reason) {
+    html += `<div class="cd-sec"><h4>封禁</h4><dl class="cd-kv">
+      ${cdKv('原因', `<span class="state-2">${esc(c.ban_reason || '—')}</span>`)}
+      ${cdKv('时间', c.banned_at ? ts(c.banned_at) : '—')}
+    </dl></div>`;
+  }
+
+  /* 历史设备 */
+  if ((c.devices || []).length > 1) {
+    html += `<div class="cd-sec"><h4>历史设备（${c.devices.length}）</h4><dl class="cd-kv">` +
+      c.devices.map(d => cdKv(`<span class="mono">${esc(d.pin)}</span>`, `${d.c} 次 · ${ts(d.last_ts)}`)).join('') +
+      `</dl></div>`;
+  }
+
+  /* 事件 */
+  if ((c.events || []).length) {
+    html += `<div class="cd-sec"><h4>最近事件</h4><ul class="cd-events">` +
+      c.events.map(e => `<li><span class="t">${ts(e.ts)}</span>` +
+        `<span>${esc(e.kind)}${e.detail ? ' · ' + esc(e.detail) : ''}</span></li>`).join('') +
+      `</ul></div>`;
+  }
+
+  /* 操作 */
+  html += `<div class="cd-sec"><h4>操作</h4><div class="cd-actions">
+    <button class="btn btn-sm" data-cd-act="extend" data-days="7">延期 7 天</button>
+    <button class="btn btn-sm" data-cd-act="extend" data-days="-7">缩短 7 天</button>
+    <button class="btn btn-sm" data-cd-act="toggle">${c.status === 2 ? '解封' : '封禁'}</button>
+    ${p ? '<button class="btn btn-sm" data-cd-act="unbind">解绑设备</button>' : ''}
+    <button class="btn btn-sm btn-danger" data-cd-act="delete">删除</button>
+  </div>
+  <div class="hint">改等级后客户端下次拉规则即按新等级下发；想让在线设备立刻刷新，到「在线设备」页强制下线再解除。</div>
+  </div>`;
+
+  $('#cdBody').innerHTML = html;
+
+  $('#cdTierSave').addEventListener('click', async () => {
+    const tier = $('#cdTier').value;
+    if (tier === c.tier) { toast('等级没变'); return; }
+    const r = await api('admin/cards/tier', { method: 'POST', body: { id: c.id, tier } });
+    if (!r.ok) { toast('改等级失败', true); return; }
+    toast('等级已改为 ' + (r.tier_label || tier.toUpperCase()));
+    loadCards();
+    openCardDetail(c.id);
+  });
+
+  $$('#cdBody [data-cd-act]').forEach(b => b.addEventListener('click', () => cdAction(b, c)));
+}
+
+async function cdAction(btn, c) {
+  const act = btn.dataset.cdAct;
+
+  if (act === 'extend') {
+    const days = +btn.dataset.days;
+    const r = await api('admin/cards/extend', { method: 'POST', body: { id: c.id, days } });
+    if (!r.ok) { toast('操作失败', true); return; }
+    toast(`已${days > 0 ? '延长' : '缩短'} ${Math.abs(days)} 天`);
+    loadCards(); openCardDetail(c.id); return;
+  }
+
+  if (act === 'toggle') {
+    const to = c.status === 2 ? 0 : 2;
+    let reason = '';
+    if (to === 2) {
+      reason = prompt('封禁原因（后台显示，也会下发到客户端提示用户）', '违规使用');
+      if (reason === null) return;
+      if (!reason.trim()) reason = '管理员封禁';
+    }
+    const r = await api('admin/cards/status', { method: 'POST', body: { id: c.id, status: to, reason } });
+    if (!r.ok) { toast('操作失败', true); return; }
+    toast(to === 2 ? '已封禁' : '已解封');
+    loadCards(); openCardDetail(c.id); return;
+  }
+
+  if (act === 'unbind') {
+    if (!confirm('解绑后这张卡密可以在别的设备上继续使用（剩余时长不变），确认？')) return;
+    const r = await api('admin/cards/unbind', { method: 'POST', body: { id: c.id } });
+    if (!r.ok) { toast('解绑失败', true); return; }
+    toast('已解绑'); loadCards(); openCardDetail(c.id); return;
+  }
+
+  if (act === 'delete') {
+    if (!confirm('删除后不可恢复，确认删除这张卡密？')) return;
+    const r = await api('admin/cards/delete', { method: 'POST', body: { id: c.id } });
+    if (!r.ok) { toast('删除失败', true); return; }
+    toast('已删除'); closeCardDetail(); loadCards();
+  }
+}
+
+$$('[data-cd-close]').forEach(el => el.addEventListener('click', closeCardDetail));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('#cd').hidden) closeCardDetail();
+});
 
 /* ═══════════ 启动 ═══════════ */
 (async function boot() {
