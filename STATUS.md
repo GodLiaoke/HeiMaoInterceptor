@@ -49,6 +49,18 @@
 - 需真机确认：设置页「拦截状态」应显示「全接管 · 例外 3362 条」或「例外 1734 条」
 - 若走窄口说明全接管装不下，把整行发回来
 
+### 上线记录（2026-11-19 11:45 北京时间）
+
+- 构建 run `44452517256`（commit `8eb93e3`），四个 macOS 机型全部 success
+- 签名包 `/dl/HeiMao_Pro_v1.1.1_build117_signed.ipa`（1,265,453 B，sha256 `f098b01b…b59754`）
+- 未签包 `/dl/HeiMao_Pro_v1.1.1_build117_unsigned.ipa`（1,247,758 B，sha256 `74fdc92f…5972c`）
+- 已核对：主程序/扩展均 1.1.1 / 117、MinimumOSVersion 15.0、双端 755、
+  entitlements 含 platform-application + packet-tunnel-provider、包内无规则文件、
+  二进制含新逻辑（「全接管 · 例外」/「服务端暂时连不上」），旧「心跳连续失败」已消失
+- 服务端 `app_versions`：1.1.1 / 117，`force_update` 保持 1，url 仍是 https://ios.ouovo.cc
+- 线上两包 HTTP 200，回读 sha256 与本地逐字节一致；下载页显示「1.1.1（117）」
+- 服务端规则未改：仍为 `Max beta`（id=8，启用，275 个去重 IP / 213 域名 / 1953 端口）
+
 ---
 
 ## 1.1.0 build 116（2026-11-19 · 拦截内核按 ACE 3.0 同构重写）
