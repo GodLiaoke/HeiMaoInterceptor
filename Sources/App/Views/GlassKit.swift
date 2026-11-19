@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 主题色
 
@@ -95,8 +96,8 @@ struct GlassCard<Content: View>: View {
             .padding(padding)
             .background(
                 ZStack {
-                    RoundedRectangle(cornerRadius: corner, style: .continuous)
-                        .fill(.ultraThinMaterial)
+                    GlassBlur()
+                        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
                     RoundedRectangle(cornerRadius: corner, style: .continuous)
                         .fill(
                             LinearGradient(
@@ -242,8 +243,8 @@ struct PowerOrb: View {
                 .blur(radius: 42)
 
             // 玻璃球体
-            Circle()
-                .fill(.ultraThinMaterial)
+            GlassBlur()
+                .clipShape(Circle())
                 .frame(width: 158, height: 158)
                 .overlay(
                     Circle()
@@ -411,8 +412,8 @@ struct NoticeBanner: View {
             .padding(14)
             .background(
                 ZStack {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(.ultraThinMaterial)
+                    GlassBlur()
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
                     RoundedRectangle(cornerRadius: 20, style: .continuous)
                         .fill(
                             LinearGradient(
@@ -526,5 +527,26 @@ extension View {
         } else {
             self.animation(animation)
         }
+    }
+}
+
+
+// MARK: - iOS 14 兼容毛玻璃
+
+/// SwiftUI 的 `.ultraThinMaterial` 是 iOS 15 才有的。
+/// 这里用 UIKit 的模糊视图顶上，`.systemUltraThinMaterialDark` 从 iOS 13 就有，
+/// 观感和 Material 基本一致，而且 14 / 15 以上是同一套渲染，不会两版不一样。
+struct GlassBlur: UIViewRepresentable {
+    var style: UIBlurEffect.Style = .systemUltraThinMaterialDark
+
+    func makeUIView(context: Context) -> UIVisualEffectView {
+        let v = UIVisualEffectView(effect: UIBlurEffect(style: style))
+        v.backgroundColor = .clear
+        v.isUserInteractionEnabled = false
+        return v
+    }
+
+    func updateUIView(_ uiView: UIVisualEffectView, context: Context) {
+        uiView.effect = UIBlurEffect(style: style)
     }
 }

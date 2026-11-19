@@ -471,7 +471,7 @@ struct ToastBubble: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 11)
             .background(
-                Capsule().fill(.ultraThinMaterial)
+                GlassBlur().clipShape(Capsule())
                     .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 0.7))
             )
             .shadow(color: .black.opacity(0.4), radius: 14, y: 6)
@@ -525,8 +525,8 @@ struct ForceUpdateView: View {
             .padding(22)
             .frame(maxWidth: 320)
             .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                GlassBlur()
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous)
                         .stroke(Color.white.opacity(0.2), lineWidth: 0.8))
             )
