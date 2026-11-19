@@ -333,7 +333,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// App 一进后台就被 iOS 冻结，主线程定时器全部停摆 —— 在线窗口必然断档，
     /// 用户回来时看到的就是「掉线了 / 要重新校验」。扩展属于系统托管的网络组件，
     /// 后台照常运行，所以由它每 150 秒续一次在线窗口（服务端 300 秒判在线），
-    App 在不在都一样。
+    /// App 在不在都一样。
     private func startKeepAliveLoop() {
         keepAliveTimer?.cancel()
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "hm.keepalive"))
