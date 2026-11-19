@@ -58,6 +58,20 @@
 - `offlineGrace` 10 分钟 → 30 分钟（硬失效不走宽限，安全性不变）
 - 新增 `tunnelBeatInterval = 300` / `tunnelVerifyInterval = 900` / `statsPublishInterval = 10`
 
+#### E. 最低系统降到 iOS 14
+
+用户要求 1.2.2 覆盖 iOS 14–27（原为 15.0 起）。
+
+- `project.yml`：`deploymentTarget.iOS` 与 `IPHONEOS_DEPLOYMENT_TARGET` 均改为 `14.0`
+- CI 硬校验同步改为 14.0（`COMPAT_OK: iOS 14.0 起装，向上兼容 iOS 27`）
+- 全量扫过 iOS 15+ API，实际只有两处，都已补兼容：
+  - `.animation(_:value:)` → 新增 `View.animate(_:value:)`，15 以上走按值动画，
+    14 退回旧签名（这些动画都只挂在一个属性上，观感一致）
+  - `.alert(_:isPresented:actions:message:)` → 改回 `Alert(title:message:primaryButton:secondaryButton:)`
+- 其余 UI 全部是 iOS 13/14 就有的写法（自绘玻璃球、GridPattern 是自定义 Shape，
+  不是 SwiftUI Grid；`presentation.wrappedValue.dismiss()` 是 iOS 14 的老 API）
+- 运行时新增的 `NWPathMonitor` / `UIBackgroundTask` 都是 iOS 12/4 起可用
+
 ### 待验证（需真机）
 
 - 挂后台 2 小时以上不断、回前台「心跳」秒数新鲜
