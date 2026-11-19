@@ -85,14 +85,14 @@ enum SecureChannel {
             completion(.failure(Failure.network)); return
         }
 
-        attemptV4(route: route, url: url, params: params, pin: pin) { result in
+        attemptV4(route: route, url: url, params: params, pin: pin, allowRetry: true) { result in
             switch result {
             case .success(let obj):
                 completion(.success(obj))
             case .failure(let err):
                 /* 不降级：通道对不上就如实报错，绝不退回 v3 / 明文 */
                 if let f = err as? Failure, case .v4Unavailable = f {
-                    completion(.failure(Failure.server("安全通道校验失败，请更新到最新版本后重试")))
+                    completion(.failure(Failure.server("通道校验未通过，请检查网络后重试；仍不行请更新到最新版本")))
                 } else {
                     completion(.failure(err))
                 }
@@ -158,10 +158,33 @@ enum SecureChannel {
         return String(data: out, encoding: .utf8)
     }
 
+    /// 本机时间与服务端时间的差值（秒）。
+    /// 设备时间不准（手动改过 / 长期没联网校时）时，请求里的 ts 会落到服务端时间窗外面，
+    /// 整条通道会被当成过期请求拒掉。这里自己记一个偏移量，按服务端时间发和签。
+    private static var clockSkew: Int = 0
+    private static let skewLock = NSLock()
+
+    static func currentTimestamp() -> Int {
+        skewLock.lock(); defer { skewLock.unlock() }
+        return Int(Date().timeIntervalSince1970) + clockSkew
+    }
+
+    /// 用服务端时间校准本机偏移；偏移有变化返回 true（调用方据此重发一次）。
+    private static func syncClock(serverNow: Int, clientNow: Int) -> Bool {
+        let delta = serverNow - clientNow
+        guard abs(delta) <= 60 * 60 * 24 * 30 else { return false }
+        skewLock.lock()
+        let changed = abs(delta - clockSkew) > 2
+        clockSkew = delta
+        skewLock.unlock()
+        return changed
+    }
+
     private static func attemptV4(route: String,
                                   url: URL,
                                   params: [String: Any],
                                   pin: String,
+                                  allowRetry: Bool,
                                   completion: @escaping (Result<[String: Any], Error>) -> Void) {
 
         var body = params
@@ -169,7 +192,8 @@ enum SecureChannel {
         body["dev"] = DeviceIdentity.shared.dev
         body["dvi"] = DeviceIdentity.shared.source
 
-        let ts = Int(Date().timeIntervalSince1970)
+        let localNow = Int(Date().timeIntervalSince1970)
+        let ts = currentTimestamp()
         var iv = Data(count: 12)
         let rc = iv.withUnsafeMutableBytes { buf -> Int32 in
             guard let base = buf.baseAddress else { return errSecParam }
@@ -212,13 +236,11 @@ enum SecureChannel {
             guard let data = data, data.count >= 29 else {
                 completion(.failure(Failure.v4Unavailable)); return
             }
-            /* 服务端回了明文（JSON）说明这条通道没建立起来 —— 不降级，直接失败 */
-            if data.first == 0x7B {
-                completion(.failure(Failure.v4Unavailable)); return
-            }
-            let resIv = data.prefix(12)
+            /* 响应密钥的盐必须是「请求 iv」——服务端 sealResponse() 就是用请求 iv 派生响应密钥的。
+               响应体自带的前 12 字节只是它自己的 GCM nonce，拿它当 HKDF 盐，
+               每条响应都解不开，客户端只能报「安全通道校验失败」。 */
             let resKey = HKDF<SHA512>.deriveKey(inputKeyMaterial: SymmetricKey(data: masterData),
-                                               salt: Data(resIv),
+                                               salt: iv,
                                                info: Data(AppConfig.v4InfoRes.utf8),
                                                outputByteCount: 32)
             let resAad = Data((AppConfig.v4AadRes + ivHex).utf8)
@@ -226,6 +248,17 @@ enum SecureChannel {
                   let objData = text.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: objData)) as? [String: Any] else {
                 completion(.failure(Failure.v4Unavailable)); return
+            }
+
+            /* 设备时间不准被时间窗挡了：用服务端回的当前时间校正本机偏移，再原样重发一遍。
+               还是 v4，不降级；重发只做一次，偏移没变化就直接把原因交给界面。 */
+            if allowRetry,
+               (obj["error"] as? String)?.lowercased() == "stale_request",
+               let now = (obj["now"] as? NSNumber)?.intValue,
+               syncClock(serverNow: now, clientNow: localNow) {
+                attemptV4(route: route, url: url, params: params, pin: pin,
+                          allowRetry: false, completion: completion)
+                return
             }
             completion(.success(obj))
         }.resume()

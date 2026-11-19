@@ -7,8 +7,8 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
-    static let appVersion     = "1.2.0"
-    static let buildNumber    = 118          // 1.2.0 build118（v4 裸密文通道 / 卡密版本分层 / 强制下线 / CRC 链校验）
+    static let appVersion     = "1.2.1"
+    static let buildNumber    = 119          // 1.2.1 build119（修 v4 响应密钥派生 / 设备时间不准自动校正重发）
     static let apiBase        = Obfs.join(0, 1)
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
