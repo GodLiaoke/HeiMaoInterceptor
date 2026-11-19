@@ -350,7 +350,7 @@ final class TunnelEngine {
 
         dnsCursorLock.lock()
         let worker = dnsWorkers[dnsCursor % dnsWorkers.count]
-        dnsCursor &+= 1
+        dnsCursor = (dnsCursor + 1) % dnsWorkers.count
         dnsCursorLock.unlock()
 
         worker.async { [weak self] in

@@ -100,7 +100,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let ok = (obj["authorized"] as? Bool) ?? false
             if !ok {
                 let reason = (obj["reason"] as? String) ?? "unknown"
-                self.dropProtection(reason: reason)
+                /* 只有卡密真的被作废 / 到期才断。
+                   window_expired（在线校验窗口过期）只是 App 侧还没续期，
+                   扩展这边断开等于把正在防护的用户直接扔出去 —— 不断。 */
+                if PacketTunnelProvider.hardReasons.contains(reason) {
+                    self.dropProtection(reason: reason)
+                }
+                self.verifyFails = 0
             }
         }
     }
@@ -334,10 +340,17 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             let ok = (obj["authorized"] as? Bool) ?? false
             if !ok {
                 let reason = (obj["reason"] as? String) ?? "unknown"
-                self.dropProtection(reason: reason)
+                if PacketTunnelProvider.hardReasons.contains(reason) {
+                    self.dropProtection(reason: reason)
+                }
             }
         }
     }
+
+    /// 命中这些原因才真正断开隧道；其余（窗口过期 / 未知）只记录
+    static let hardReasons: Set<String> = [
+        "card_revoked", "card_expired", "card_not_found", "no_card"
+    ]
 
     /// 卸载规则 + 停隧道：内存里的规则先清掉再断，断完这一份就不存在了
     private func dropProtection(reason: String) {
