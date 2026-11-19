@@ -111,19 +111,19 @@ jobs:
           ls -la "$APP/PlugIns" || true
           test -f "$APP/rules.txt" && echo "rules.txt OK" || echo "rules.txt MISSING"
 
-          # ---- 兼容性硬校验：必须支持 iOS 15 及以上（含 iOS 27）----
+          # ---- 兼容性硬校验：必须支持 iOS 14 及以上（含 iOS 27）----
           MINOS_APP=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist")
           MINOS_EXT=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/PlugIns/HeiMaoTunnel.appex/Info.plist" 2>/dev/null || echo "missing")
           echo "MinimumOSVersion app=$MINOS_APP ext=$MINOS_EXT"
-          if [ "$MINOS_APP" != "15.0" ]; then
-            echo "ERROR: App 最低系统版本必须为 15.0（当前 $MINOS_APP）"
+          if [ "$MINOS_APP" != "14.0" ]; then
+            echo "ERROR: App 最低系统版本必须为 14.0（当前 $MINOS_APP）"
             exit 1
           fi
-          if [ "$MINOS_EXT" != "15.0" ]; then
-            echo "ERROR: 隧道扩展最低系统版本必须为 15.0（当前 $MINOS_EXT）"
+          if [ "$MINOS_EXT" != "14.0" ]; then
+            echo "ERROR: 隧道扩展最低系统版本必须为 14.0（当前 $MINOS_EXT）"
             exit 1
           fi
-          echo "COMPAT_OK: iOS 15.0 起装，向上兼容 iOS 27"
+          echo "COMPAT_OK: iOS 14.0 起装，向上兼容 iOS 27"
 
           echo "IPA_SIZE=$(stat -f%z HeiMaoInterceptor.ipa)" >> "$GITHUB_ENV"
 
