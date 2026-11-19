@@ -108,6 +108,61 @@ enum DNSMessage {
         return out
     }
 
+    /// 在转发回来的应答里找命中规则的 CNAME / 记录名
+    ///
+    /// 为什么需要：规则里配的经常是 CNAME 目标（比如 cs.xxx.anticheatexpert.com），
+    /// 客户端查的却是另一个名字，CNAME 链一绕，只看 qname 就漏过去了。
+    /// 这里把 answer 段的 owner name 与 CNAME 的 rdata 都过一遍，命中就改成黑洞应答。
+    static func firstBlockedName(in data: Data, checker: (String) -> Bool) -> String? {
+        guard data.count >= 12 else { return nil }
+        let bytes = [UInt8](data)
+        let qd = Int(bytes[4]) << 8 | Int(bytes[5])
+        let an = Int(bytes[6]) << 8 | Int(bytes[7])
+        guard an > 0 else { return nil }
+
+        var i = 12
+        for _ in 0..<qd {
+            guard let (_, end) = readQName(bytes, i) else { return nil }
+            i = end + 4
+            guard i <= bytes.count else { return nil }
+        }
+
+        for _ in 0..<an {
+            guard let (owner, end) = readQName(bytes, i) else { return nil }
+            i = end
+            guard i + 10 <= bytes.count else { return nil }
+            let type = UInt16(bytes[i]) << 8 | UInt16(bytes[i + 1])
+            let rdlen = Int(bytes[i + 8]) << 8 | Int(bytes[i + 9])
+            i += 10
+            guard i + rdlen <= bytes.count else { return nil }
+
+            if checker(owner) { return owner }
+            if type == 5, let (cname, _) = readQName(bytes, i) {
+                if checker(cname) { return cname }
+            }
+            i += rdlen
+        }
+        return nil
+    }
+
+    /// 构造 SERVFAIL（上游全失败时回给客户端，让它立刻重试，而不是干等超时）
+    static func buildFailure(for q: Query) -> Data {
+        var out = Data()
+        out.append(be16(q.id))
+        let rdBit = UInt8((q.flags >> 8) & 0x01)
+        out.append(rdBit | 0x80)               // QR = 1
+        out.append(0x80 | 0x02)                // RA = 1，RCODE = 2 (SERVFAIL)
+        out.append(be16(1))                    // QDCOUNT
+        out.append(be16(0))                    // ANCOUNT
+        out.append(be16(0))                    // NSCOUNT
+        out.append(be16(0))                    // ARCOUNT
+        let raw = [UInt8](q.raw)
+        if q.questionEnd > 12, q.questionEnd <= raw.count {
+            out.append(contentsOf: raw[12..<q.questionEnd])
+        }
+        return out
+    }
+
     static func be16(_ v: UInt16) -> Data { Data([UInt8(v >> 8), UInt8(v & 0xFF)]) }
 
     static func be32bytes(_ v: UInt32) -> Data {

@@ -25,6 +25,8 @@ final class TunnelEngine {
         var tunnelPackets = 0
         /// 收到的 DNS 查询数（含转发和黑洞）
         var dnsQueries = 0
+        /// 上游全部失败、给客户端回了 SERVFAIL 的次数
+        var dnsFailures = 0
         /// 不该进隧道的包（路由没生效时会冒出来）
         var stray = 0
         var startedAt = Date()
@@ -39,6 +41,7 @@ final class TunnelEngine {
              "cache": cacheHits,
              "tunnel": tunnelPackets,
              "dns": dnsQueries,
+             "dnsFail": dnsFailures,
              "stray": stray,
              "uptime": Int(Date().timeIntervalSince(startedAt))]
         }
@@ -70,9 +73,21 @@ final class TunnelEngine {
     private let statsLock = NSLock()
     private var stats = Stats()
 
-    private let dnsQueue = DispatchQueue(label: "com.heimao.engine.dns", attributes: .concurrent)
-    /// 同时最多 8 个上游查询，避免一轮网页加载把线程打爆
-    private let dnsSlots = DispatchSemaphore(value: 8)
+    /// DNS 转发用固定数量的串行 worker。
+    ///
+    /// 1.1.0 是 concurrent queue + semaphore(8)：每个查询要阻塞 900ms×3 个上游，
+    /// 网页一开就是几十个域名同时进来，GCD 会不停加线程，线程数一爆扩展就被系统回收
+    /// —— 用户看到的就是「VPN 老是断开」。固定 worker 后线程数封顶。
+    private let dnsWorkers: [DispatchQueue] = (0..<6).map {
+        DispatchQueue(label: "com.heimao.engine.dns.\($0)", qos: .userInitiated)
+    }
+    private var dnsCursor = 0
+    private let dnsCursorLock = NSLock()
+
+    /// 读包循环的状态：唤醒后要能重新拉起来，但不能同时挂两条链
+    private let readLock = NSLock()
+    private var reading = false
+    private var lastReadAt = Date()
 
     private var running = false
     private let runningLock = NSLock()
@@ -117,7 +132,7 @@ final class TunnelEngine {
         }
         statsLock.lock(); stats = seed; statsLock.unlock()
         runningLock.lock(); running = true; runningLock.unlock()
-        readLoop()
+        startReading()
     }
 
     private static func value(_ any: Any?) -> Int {
@@ -129,6 +144,7 @@ final class TunnelEngine {
 
     func stop() {
         runningLock.lock(); running = false; runningLock.unlock()
+        readLock.lock(); reading = false; readLock.unlock()
     }
 
     private var isRunning: Bool {
@@ -136,14 +152,45 @@ final class TunnelEngine {
         return running
     }
 
-    private func readLoop() {
-        guard isRunning else { return }
+    /// 唤醒后重新拉一轮读包循环
+    ///
+    /// 幂等：已经在读就直接返回，不会挂出两条 readPackets。
+    /// 只有「超过 60 秒一个包都没读到」才认为上一轮回调死掉了、需要重建，
+    /// 避免空闲时误判成停摆。
+    func resumeReading() {
+        readLock.lock()
+        let stale = Date().timeIntervalSince(lastReadAt) > 60
+        if reading && stale { reading = false }
+        let need = !reading
+        if need { reading = true }
+        readLock.unlock()
+        if need { readOnce() }
+    }
+
+    private func startReading() {
+        readLock.lock()
+        reading = true
+        lastReadAt = Date()
+        readLock.unlock()
+        readOnce()
+    }
+
+    private func readOnce() {
+        guard isRunning else {
+            readLock.lock(); reading = false; readLock.unlock()
+            return
+        }
         flow.readPackets { [weak self] packets, _ in
-            guard let self = self, self.isRunning else { return }
+            guard let self = self else { return }
+            if !self.isRunning {
+                self.readLock.lock(); self.reading = false; self.readLock.unlock()
+                return
+            }
+            self.readLock.lock(); self.lastReadAt = Date(); self.readLock.unlock()
             for pkt in packets {
                 self.handle(pkt)
             }
-            self.readLoop()
+            self.readOnce()
         }
     }
 
@@ -269,7 +316,7 @@ final class TunnelEngine {
 
         guard let query = DNSMessage.parseQuery(payload) else {
             /* 问题段解析失败：原样送去上游（原版也是 forward，不是丢弃） */
-            forwardDNS(payload, from: p, udp: udp, cacheKey: nil)
+            forwardDNS(payload, query: nil, from: p, udp: udp, cacheKey: nil)
             return
         }
 
@@ -290,22 +337,49 @@ final class TunnelEngine {
             return
         }
 
-        forwardDNS(payload, from: p, udp: udp, cacheKey: key)
+        forwardDNS(payload, query: query, from: p, udp: udp, cacheKey: key)
     }
 
-    private func forwardDNS(_ payload: Data, from p: PacketCodec.Parsed,
+    private func forwardDNS(_ payload: Data, query: DNSMessage.Query?,
+                            from p: PacketCodec.Parsed,
                             udp: PacketCodec.UDPInfo, cacheKey: String?) {
         statsLock.lock(); stats.passedDNS += 1; statsLock.unlock()
         let clientIP = p.srcIP
         let clientPort = udp.srcPort
         let serverIP = p.dstIP
 
-        dnsQueue.async { [weak self] in
-            guard let self = self else { return }
-            self.dnsSlots.wait()
-            defer { self.dnsSlots.signal() }
+        dnsCursorLock.lock()
+        let worker = dnsWorkers[dnsCursor % dnsWorkers.count]
+        dnsCursor &+= 1
+        dnsCursorLock.unlock()
 
-            guard let response = DNSUpstream.query(payload) else { return }
+        worker.async { [weak self] in
+            guard let self = self else { return }
+
+            guard let response = DNSUpstream.query(payload) else {
+                /* 三个上游全失败：回 SERVFAIL，让客户端立刻重试/换域名。
+                   以前是直接不回包，客户端只能干等到自己超时，体感就是「网卡了」。 */
+                self.statsLock.lock(); self.stats.dnsFailures += 1; self.statsLock.unlock()
+                if let q = query {
+                    self.sendDNS(DNSMessage.buildFailure(for: q),
+                                 from: serverIP, to: clientIP, port: clientPort)
+                }
+                return
+            }
+            /* CNAME 链检查：规则里配的是 CNAME 目标时，只看请求的 qname 会漏。
+               命中就把这条应答换成黑洞，客户端拿到 0.0.0.0。 */
+            if let q = query,
+               DNSMessage.firstBlockedName(in: response,
+                                           checker: { self.isDomainBlocked($0) }) != nil {
+                self.statsLock.lock()
+                self.stats.blockedPackets += 1
+                self.stats.blockedDomains += 1
+                self.statsLock.unlock()
+                self.sendDNS(DNSMessage.buildSinkhole(for: q),
+                             from: serverIP, to: clientIP, port: clientPort)
+                return
+            }
+
             if let key = cacheKey {
                 self.storeCache(key: key, response: response)
             }
@@ -334,15 +408,35 @@ final class TunnelEngine {
 ///   - 单个上游 900ms 超时，失败立刻换下一个（三个都失败就不回包，客户端自己超时）
 enum DNSUpstream {
 
-    static func query(_ payload: Data, timeout: Int32 = 900) -> Data? {
+    /// 三路上游并行问，谁先回用谁。
+    ///
+    /// 1.1.0 是串行三级回落（900ms × 3 = 最差 2.7 秒），网页一开就一堆域名排着队等，
+    /// 体感是「开了防护网就变慢」，慢到最后系统把隧道判死。并行后最差 600ms。
+    static func query(_ payload: Data, timeout: Int32 = 600) -> Data? {
         guard payload.count >= 2 else { return nil }
         let wantID = UInt16(payload[0]) << 8 | UInt16(payload[1])
-        for server in AppConfig.upstreamDNS {
-            if let r = send(payload, to: server, timeout: timeout, wantID: wantID) {
-                return r
+        let servers = AppConfig.upstreamDNS
+        guard !servers.isEmpty else { return nil }
+
+        let lock = NSLock()
+        var result: Data?
+        let group = DispatchGroup()
+
+        for server in servers {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { group.leave() }
+                if let r = send(payload, to: server, timeout: timeout, wantID: wantID) {
+                    lock.lock()
+                    if result == nil { result = r }
+                    lock.unlock()
+                }
             }
         }
-        return nil
+
+        _ = group.wait(timeout: .now() + .milliseconds(Int(timeout) + 150))
+        lock.lock(); let out = result; lock.unlock()
+        return out
     }
 
     private static func send(_ payload: Data, to host: String,

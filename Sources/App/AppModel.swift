@@ -416,14 +416,13 @@ final class AppModel: ObservableObject {
                             self.renewFailures = 0
                             if !silent { self.publishResult("授权已失效：\(lic.blockReason)") }
                         } else {
-                            /* 心跳连续失败到阈值：按链路断了处理，卸载规则并断开隧道 */
+                            /* 1.1.1：网络失败不再卸载规则、不再断隧道。
+                               以前心跳连续两次（60 秒一次，也就是两分钟）失败就 stop，
+                               锁屏、切网、地铁里信号差都会踩到 —— 用户体感就是「VPN 老是断开」。
+                               规则已经在本地，服务端连不上只影响复核，防护照常跑。 */
                             self.renewFailures += 1
-                            if self.renewFailures >= 2 {
-                                self.renewFailures = 0
-                                RuleService.shared.clear()
-                                self.refreshRules()
-                                if self.tunnel.isConnected { self.tunnel.stop() }
-                                self.publishResult("心跳连续失败，防护已断开")
+                            if self.renewFailures == 2 {
+                                self.publishResult("服务端暂时连不上，防护继续运行，恢复网络后会自动复核")
                             } else if !silent {
                                 self.toast = err.localizedDescription
                             }

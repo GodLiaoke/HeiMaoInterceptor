@@ -16,6 +16,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var startedAt = Date()
     /// 本次隧道的路由方案描述（诊断用）
     private var routeInfo = ""
+    /// true = 全接管（0.0.0.0/0 + 例外）；false = 窄口
+    private var routeHijackAll = false
     /// 规则热更新要按新规则重算路由，这里留一份启动时的配置和 MTU
     private var lastConf: [String: Any] = [:]
     private var lastMTU = AppConfig.mtu
@@ -173,20 +175,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     ///   2. 精确档装不下时逐级放大聚合粒度，而不是直接跳到 split
     private func makeRoutePlans(_ parsed: RuleSet, conf: [String: Any]) -> [RuleSet.RoutePlan] {
         let dnsValue = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F_0001
+        let clientValue = RuleSet.ipToUInt(clientIP) ?? 0x0A6F_0002
+        let keepInside = [dnsValue, clientValue]
 
-        /* 1.1.0 的窄口模型（与 ACE 一致）：
-           includedRoutes 只放「规则里的 IP 段 + 假 DNS 的 /32」，
-           不接管 0.0.0.0/0，也不生成补集例外。
-           非规则流量压根不进隧道，所以不存在「补集 2700 条装不下就降级」。 */
-        var plans: [RuleSet.RoutePlan] = [parsed.routePlan(forceInside: [dnsValue])]
-
-        /* 规则段太碎（比如好几千条 /32）时，逐级合并粒度再试：
-           /24 → /20 → /16，宁可多接管一点相邻地址，也别让设置装不下。 */
-        for bits in [24, 20, 16] {
-            plans.append(parsed.routePlan(forceInside: [dnsValue], coarsenTo: bits))
+        /* 1.1.1：全接管 + 精确补集优先。
+           窄口模型（1.1.0）只把规则 IP 拽进隧道，iOS 在 split 隧道下经常不把
+           系统 DNS 交给隧道，域名规则等于没生效 —— 这是「拦不完整」的根因。
+           全接管让所有 DNS/TCP 都经过这里，非规则流量由 excludedRoutes 放回物理网卡。
+           阶梯：精确 → /24 → /20 → /16，哪一档装得下用哪一档。
+           精确档能保留「同网段邻居不受影响」，粗化档会多接管一点邻居地址。 */
+        var plans: [RuleSet.RoutePlan] = []
+        for bits in [32, 24, 20] {
+            if let full = parsed.fullRoutePlan(forceInside: keepInside, coarsenTo: bits) {
+                plans.append(full)
+            }
         }
 
-        /* 最后一档：只留假 DNS。IP 规则失效，但域名拦截照旧能用，也不会让用户断网。 */
+        /* 兜底一：窄口（规则 IP 段 + 假 DNS）。
+           全接管补集装不下时用，保证至少 IP 规则能拦、也不会断网。 */
+        plans.append(parsed.routePlan(forceInside: keepInside))
+
+        /* 兜底二：规则段太碎（好几千条 /32）时逐级合并粒度再试 */
+        for bits in [24, 20, 16] {
+            plans.append(parsed.routePlan(forceInside: keepInside, coarsenTo: bits))
+        }
+
+        /* 兜底三：只留假 DNS，不做 IP 接管（退到最后也不能让用户断网） */
         var dnsOnly = RuleSet.RoutePlan()
         dnsOnly.degraded = true
         dnsOnly.included = [(dnsIP, 32)]
@@ -207,6 +221,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let self = self else { return }
             if error == nil {
                 self.routeInfo = plan.description
+                self.routeHijackAll = plan.hijackAll
                 self.startEngine()
                 completion(nil)
                 return
@@ -234,6 +249,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let self = self else { return }
             if error == nil {
                 self.routeInfo = plan.description
+                self.routeHijackAll = plan.hijackAll
                 StatsBridge.write(self.statsPayload())
                 return
             }
@@ -247,8 +263,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         s.mtu = NSNumber(value: mtu)
         let v4 = NEIPv4Settings(addresses: [clientIP], subnetMasks: ["255.255.255.255"])
         v4.includedRoutes = plan.included.map {
-            NEIPv4Route(destinationAddress: $0.0,
-                        subnetMask: PacketTunnelProvider.maskString($0.1))
+            /* /0 用系统自带的默认路由对象，别手搓 0.0.0.0/0.0.0.0 */
+            $0.1 == 0 ? NEIPv4Route.default()
+                      : NEIPv4Route(destinationAddress: $0.0,
+                                    subnetMask: PacketTunnelProvider.maskString($0.1))
         }
         v4.excludedRoutes = plan.excluded.map {
             NEIPv4Route(destinationAddress: $0.0,
@@ -274,23 +292,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         startVerifyLoop()
         startStatsPublisher()
 
-        /* 授权校验放到隧道跑起来之后，别挡着启动 */
+        /* 保险：授权校验放到隧道跑起来之后，别挡着启动 */
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             self?.verifyAfterStart()
         }
 
-        /* 保险：全接管方案如果被系统忽略了排除路由，用户会「上不了网」。
-           启动 20 秒后看一眼统计，旁路包占了绝大多数就直接断开，
-           宁可防护失效也不能让用户断网。 */
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { [weak self] in
-            guard let self = self, let engine = self.engine else { return }
-            let snap = engine.snapshot()
-            let total = (snap["tunnel"] as? Int) ?? 0
-            let stray = (snap["stray"] as? Int) ?? 0
-            if total > 300 && stray > total * 3 / 4 {
-                self.dropProtection(reason: "route_hijack_failed")
-            }
-        }
+        /* 1.1.1 删掉了「启动 20 秒后旁路包占比高就主动断开」这段。
+           那个判据是给全接管方案兜底的，但窄口/全接管下 DNS 转发、规则 IP 的
+           非目标端口流量都会被算成 stray —— 正常使用也会被误判成「路由被系统忽略」，
+           用户看到的就是 VPN 莫名其妙掉线。路由有没有生效改由诊断行判断，不再自动断网。 */
     }
 
     /// 运行中复查：卡密中途被作废 / 到期，隧道主动断开
@@ -312,12 +322,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             guard let self = self else { return }
 
             guard case .success(let obj) = result else {
-                /* 一次失败不动作；连续失败等于心跳断了，规则立刻作废并断开隧道 */
+                /* 1.1.1：网络失败不再断隧道。
+                   以前连续两次（10 分钟）连不上服务端就 cancelTunnelWithError，
+                   手机锁屏、切网、地铁里信号差都会触发 —— 用户体感就是「VPN 老是断开」。
+                   防护是否继续由本地授权状态决定，服务端连不上只是复核延后。 */
                 self.verifyFails += 1
-                if self.verifyFails >= 2 {
-                    self.verifyFails = 0
-                    self.dropProtection(reason: "heartbeat_lost")
-                }
                 return
             }
             self.verifyFails = 0
@@ -360,6 +369,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
         payload["routes"] = routeInfo
         payload["mode"] = "ace"
+        payload["routeMode"] = routeHijackAll ? "full" : "narrow"
         payload["routeCount"] = ruleSet.report.routes
         payload["phase"] = phase
         /* 注意：这里必须是 dnsServer，不能写 dns。
@@ -406,6 +416,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func stopStatsServer() {
         statsServer?.stop()
         statsServer = nil
+    }
+
+    /// 设备休眠 / 唤醒
+    ///
+    /// 系统休眠时会把扩展挂起，readPackets 的回调有可能不再回来。
+    /// 唤醒后不重新拉一轮，表现就是「VPN 显示已连接，但一个包都不读了」——
+    /// 用户以为隧道断了，其实是引擎停摆，拦截全失效。
+    override func sleep(completionHandler: @escaping () -> Void) {
+        StatsBridge.write(statsPayload())
+        completionHandler()
+    }
+
+    override func wake() {
+        StatsBridge.write(statsPayload())
+        guard phase == "running", let engine = engine else { return }
+        engine.resumeReading()
     }
 
     override func stopTunnel(with reason: NEProviderStopReason,

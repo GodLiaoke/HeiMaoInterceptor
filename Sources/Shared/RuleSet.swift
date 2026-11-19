@@ -503,9 +503,57 @@ struct RuleSet {
         var routeCount: Int { included.count + excluded.count }
 
         var description: String {
+            if hijackAll { return "全接管 · 例外 \(excluded.count) 条" }
             if degraded { return "DNS 接管 · 无 IP 路由" }
             return "规则接管 · 路由 \(included.count) 条"
         }
+    }
+
+    /// 全接管方案：included = 0.0.0.0/0，excluded =「规则段 + forceInside」的精确补集
+    ///
+    /// 1.1.1 为什么又回到全接管：
+    ///   窄口（只把规则 IP 拽进隧道）看着安全，但 iOS 在 split 隧道下经常不把
+    ///   系统 DNS 交给隧道 —— 域名规则等于一条都不生效，用户看到的就是「拦不完整」。
+    ///   全接管 + 精确补集能把所有 DNS 与 TCP 都收进隧道做判定，非规则流量由
+    ///   excludedRoutes 交回物理网卡，不会因为路由算错把用户断网。
+    ///
+    /// 补集是精确的：0.0.0.0/0 减去规则段，一块不多一块不少。
+    /// forceInside（假 DNS、隧道本机地址）从补集里挖掉，保证它们留在隧道里。
+    /// `coarsenTo` 是调用方给的退让档位：规则段先按 /24、/20 合并再算补集，
+    /// 条数能降下来，代价是把同网段的邻居地址也一起接管（由上层按阶梯试着装）。
+    func fullRoutePlan(forceInside: [UInt32] = [],
+                       coarsenTo bits: Int = 32,
+                       maxRoutes: Int = 4000) -> RoutePlan? {
+        var ranges: [(UInt32, UInt32)] = []
+        let source = bits < 32 ? RuleSet.aggregate(routes, to: bits) : routes
+        for item in source {
+            guard let base = RuleSet.ipToUInt(item.0) else { continue }
+            let m = RuleSet.mask(for: item.1)
+            ranges.append((base & m, (base & m) | ~m))
+        }
+        for ip in forceInside { ranges.append((ip, ip)) }
+
+        let merged = RuleSet.mergeRanges(ranges)
+        var gaps: [(UInt32, UInt32)] = []
+        var cursor: UInt64 = 0
+        for (s, e) in merged {
+            if UInt64(s) > cursor { gaps.append((UInt32(cursor), s - 1)) }
+            if UInt64(e) + 1 > cursor { cursor = UInt64(e) + 1 }
+        }
+        if cursor <= UInt64(UInt32.max) {
+            gaps.append((UInt32(cursor), UInt32.max))
+        }
+
+        let excluded = RuleSet.cidrs(from: gaps)
+        /* 补集空 = 规则覆盖了整张 IPv4 表，全接管会把所有流量关进隧道再黑洞掉。
+           这种包宁可退窄口，也不能让用户断网。 */
+        guard !excluded.isEmpty, excluded.count <= maxRoutes else { return nil }
+
+        var plan = RoutePlan()
+        plan.hijackAll = true
+        plan.included = [("0.0.0.0", 0)]
+        plan.excluded = excluded
+        return plan
     }
 
     /// - Parameter forceInside: 必须留在隧道里的地址（假 DNS 等），补成 /32

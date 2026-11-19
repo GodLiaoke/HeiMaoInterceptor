@@ -104,37 +104,83 @@ final class TunnelController: ObservableObject {
             manager.protocolConfiguration = proto
             manager.localizedDescription = AppConfig.appName
             manager.isEnabled = true
+            /* 按需连接：切网、锁屏、系统回收扩展之后，由系统把隧道自己拉回来。
+               没有这一条，隧道一断就永远停在「未开启」，用户只能手动再点开。 */
+            manager.isOnDemandEnabled = true
+            manager.onDemandRules = [NEOnDemandRuleConnect()]
 
             manager.saveToPreferences { error in
-                if let error = error {
-                    let friendly = TunnelController.explain(error)
-                    DispatchQueue.main.async {
-                        self.lastError = friendly.localizedDescription
-                        completion(.failure(friendly))
+                if error != nil {
+                    /* 伪签名 / 部分巨魔环境不认 onDemand：退回普通保存再试一次，
+                       不能因为按需连接写不进去就整个开不起来。 */
+                    manager.isOnDemandEnabled = false
+                    manager.onDemandRules = []
+                    manager.saveToPreferences { retryError in
+                        if let retryError = retryError {
+                            let friendly = TunnelController.explain(retryError)
+                            DispatchQueue.main.async {
+                                self.lastError = friendly.localizedDescription
+                                completion(.failure(friendly))
+                            }
+                            return
+                        }
+                        self.launch(manager, completion: completion)
                     }
                     return
                 }
-                manager.loadFromPreferences { _ in
-                    do {
-                        try manager.connection.startVPNTunnel()
-                        DispatchQueue.main.async {
-                            self.manager = manager
-                            self.status = manager.connection.status
-                            completion(.success(()))
-                        }
-                    } catch {
-                        DispatchQueue.main.async {
-                            self.lastError = error.localizedDescription
-                            completion(.failure(error))
-                        }
-                    }
+                self.launch(manager, completion: completion)
+            }
+        }
+    }
+
+    /// 保存完配置之后真正把隧道拉起来
+    private func launch(_ manager: NETunnelProviderManager,
+                        completion: @escaping (Result<Void, Error>) -> Void) {
+        manager.loadFromPreferences { _ in
+            do {
+                try manager.connection.startVPNTunnel()
+                DispatchQueue.main.async {
+                    self.manager = manager
+                    self.status = manager.connection.status
+                    completion(.success(()))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.lastError = error.localizedDescription
+                    completion(.failure(error))
                 }
             }
         }
     }
 
     func stop() {
-        manager?.connection.stopVPNTunnel()
+        guard let manager = manager else {
+            /* 管理器还没读回来：先读出配置再停，避免「点了关闭没反应」 */
+            NETunnelProviderManager.loadAllFromPreferences { [weak self] managers, _ in
+                guard let self = self else { return }
+                guard let m = TunnelController.pick(managers) else {
+                    DispatchQueue.main.async { self.status = .disconnected }
+                    return
+                }
+                self.disableOnDemandAndStop(m)
+            }
+            return
+        }
+        disableOnDemandAndStop(manager)
+    }
+
+    /// 先关按需连接再停隧道。
+    /// 不先关的话，系统看到 onDemand 规则会立刻把隧道重新拉起来 —— 用户点关闭却关不掉。
+    private func disableOnDemandAndStop(_ manager: NETunnelProviderManager) {
+        if manager.isOnDemandEnabled {
+            manager.isOnDemandEnabled = false
+            manager.onDemandRules = []
+            manager.saveToPreferences { _ in
+                manager.connection.stopVPNTunnel()
+            }
+        } else {
+            manager.connection.stopVPNTunnel()
+        }
         DispatchQueue.main.async { self.status = .disconnected }
     }
 
@@ -209,15 +255,28 @@ final class TunnelController: ObservableObject {
     ///
     /// 新规则随启动配置重新下发，路由按新规则重算（代价是短暂断流 1~2 秒）。
     func restart() {
-        guard isConnected else { return }
-        manager?.connection.stopVPNTunnel()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
-            guard let self = self else { return }
-            self.start { result in
-                if case .failure(let err) = result {
-                    self.lastError = err.localizedDescription
+        guard isConnected, let manager = manager else { return }
+
+        let doStop = { [weak self] in
+            manager.connection.stopVPNTunnel()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+                guard let self = self else { return }
+                self.start { result in
+                    if case .failure(let err) = result {
+                        self.lastError = err.localizedDescription
+                    }
                 }
             }
+        }
+
+        /* 有按需连接时先关掉再停：不关的话系统看到 onDemand 规则会立刻把隧道拉起来，
+           跟下面 1.8 秒后的 start 撞在一起，表现是反复连/断。 */
+        if manager.isOnDemandEnabled {
+            manager.isOnDemandEnabled = false
+            manager.onDemandRules = []
+            manager.saveToPreferences { _ in doStop() }
+        } else {
+            doStop()
         }
     }
 
