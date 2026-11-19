@@ -2,14 +2,14 @@ name: HeiMaoInterceptor
 options:
   bundleIdPrefix: com.heimao
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "14.0"
   createIntermediateGroups: true
   groupSortPosition: top
 
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "14.0"
     MARKETING_VERSION: "1.2.2"
     CURRENT_PROJECT_VERSION: "120"
     TARGETED_DEVICE_FAMILY: "1,2"

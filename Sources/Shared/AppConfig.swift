@@ -53,8 +53,9 @@ enum AppConfig {
 
     /// 扩展内心跳：App 在后台被挂起之后，由隧道扩展继续续在线窗口。
     /// 这是「后台常驻」的关键 —— App 进程会被系统冻结，扩展不会。
-    /// 服务端窗口 600 秒，300 秒一次留两次余量，一次失败也来得及补。
-    static let tunnelBeatInterval: TimeInterval = 5 * 60
+    /// 服务端窗口 600 秒；后台在线判定 300 秒，这里 150 秒打一次，
+    /// 中间容一次网络失败也不会从「在线设备」里掉出去。
+    static let tunnelBeatInterval: TimeInterval = 150
 
     /// 扩展内强校验：真正问一次「卡密还能不能用」（比心跳重，间隔拉长）
     static let tunnelVerifyInterval: TimeInterval = 15 * 60

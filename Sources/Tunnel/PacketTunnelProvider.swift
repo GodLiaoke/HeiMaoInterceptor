@@ -368,10 +368,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             let authorized = (obj["authorized"] as? Bool) ?? true
+            /* 服务端 beat 会一并回「是否被强制下线」，这里当场处理，
+               不必等到 15 分钟一次的重校验 —— 后台点下线要尽快生效。 */
+            let kicked = (obj["kicked"] as? Bool) ?? false
+            if kicked {
+                self.dropProtection(reason: "kicked")
+                return
+            }
             if !authorized {
-                let reason = (obj["reason"] as? String) ?? "unknown"
+                let reason = (obj["reason"] as? String) ?? (obj["error"] as? String) ?? "unknown"
                 if PacketTunnelProvider.hardReasons.contains(reason) {
                     self.dropProtection(reason: reason)
+                    return
                 }
             }
             self.verifyFails = 0

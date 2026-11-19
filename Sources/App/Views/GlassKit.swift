@@ -510,3 +510,21 @@ struct GlassButton: View {
         .buttonStyle(.plain)
     }
 }
+
+// MARK: - iOS 14 兼容
+
+extension View {
+    /// `.animation(_:value:)` 是 iOS 15 才有的签名。
+    ///
+    /// 1.2.2 把最低系统降到 iOS 14（覆盖 14–27），这里做一层转发：
+    /// 15 以上走按值触发的精确动画，14 退回旧的整体动画 ——
+    /// 这些动画都只用在一个属性变化上，观感一致。
+    @ViewBuilder
+    func animate<V: Equatable>(_ animation: Animation?, value: V) -> some View {
+        if #available(iOS 15.0, *) {
+            self.animation(animation, value: value)
+        } else {
+            self.animation(animation)
+        }
+    }
+}

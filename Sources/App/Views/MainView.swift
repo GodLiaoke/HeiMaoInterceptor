@@ -89,19 +89,19 @@ struct MainView: View {
         .onReceive(model.$closeSettingsRequest.compactMap { $0 }) { _ in
             withAnimation(.easeInOut(duration: 0.22)) { showSettings = false }
         }
-        .alert("发现新版本", isPresented: $model.showUpdate) {
-            Button("稍后", role: .cancel) { }
-            Button("立即更新") {
-                if let info = model.updateInfo, let url = URL(string: info.url) {
-                    UIApplication.shared.open(url)
-                }
-            }
-        } message: {
-            if let info = model.updateInfo {
-                Text("v\(info.version)\n\(info.notes.isEmpty ? "建议更新到最新版本" : info.notes)")
-            } else {
-                Text("建议更新到最新版本")
-            }
+        /* iOS 14 只有 .alert(isPresented:content:) 这一套；
+           带 role 的按钮 + message 闭包是 iOS 15 的写法，降到 14 会编译不过。 */
+        .alert(isPresented: $model.showUpdate) {
+            Alert(
+                title: Text("发现新版本"),
+                message: Text(updateMessage),
+                primaryButton: .default(Text("立即更新")) {
+                    if let info = model.updateInfo, let url = URL(string: info.url) {
+                        UIApplication.shared.open(url)
+                    }
+                },
+                secondaryButton: .cancel(Text("稍后"))
+            )
         }
         .onAppear {
             withAnimation(.easeOut(duration: 0.7)) { appear = true }
@@ -113,6 +113,13 @@ struct MainView: View {
     }
 
     // MARK: - 顶栏
+
+    /// 更新弹窗正文：iOS 14 的 Alert 要一段现成的文字，不能用闭包现场渲染
+    private var updateMessage: String {
+        guard let info = model.updateInfo else { return "建议更新到最新版本" }
+        let notes = info.notes.isEmpty ? "建议更新到最新版本" : info.notes
+        return "v\(info.version)\n\(notes)"
+    }
 
     private var header: some View {
         HStack(spacing: 12) {
@@ -175,8 +182,8 @@ struct MainView: View {
                      busy: model.busy,
                      blocked: !model.authorized)
                 .scaleEffect(appear ? (model.tunnel.isConnected ? 1.05 : 1.0) : 0.9)
-                .animation(.spring(response: 0.46, dampingFraction: 0.74),
-                           value: model.tunnel.isConnected)
+                .animate(.spring(response: 0.46, dampingFraction: 0.74),
+                         value: model.tunnel.isConnected)
                 .contentShape(Circle())
                 .onTapGesture {
                     let impact = UIImpactFeedbackGenerator(style: model.tunnel.isConnected ? .light : .medium)
