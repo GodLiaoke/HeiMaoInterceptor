@@ -44,7 +44,7 @@ enum GuardLink {
 
         lastGuardBeat = HMGuard.heartbeat
 
-        let thread = Thread { loop(breach: breach) }
+        let thread = Thread { loop(breach) }
         thread.name = "hm.link"
         thread.qualityOfService = .userInitiated
         thread.stackSize = 128 * 1024

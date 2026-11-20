@@ -31,6 +31,11 @@ jobs:
           brew install xcodegen || brew upgrade xcodegen
           xcodegen --version
 
+      - name: Obfuscate strings
+        run: |
+          # 1.2.3：把安全核心里的字符串字面量换成运行时解码，二进制里 strings 不到原文
+          python3 Tools/obfuscate_strings.py
+
       - name: Obfuscate symbols
         run: |
           # 类型名在构建副本上改成无意义短名，映射表只留在 runner 里（排查崩溃用）

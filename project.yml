@@ -17,6 +17,9 @@ settings:
     ALWAYS_SEARCH_USER_PATHS: NO
     CLANG_ENABLE_MODULES: YES
     SWIFT_OPTIMIZATION_LEVEL: "-O"
+    SWIFT_COMPILATION_MODE: wholemodule
+    DEAD_CODE_STRIPPING: YES
+    STRIP_SWIFT_SYMBOLS: YES
     DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
     # 产物去符号：符号表不进 ipa，class-dump / nm 拿不到可读结构
     STRIP_INSTALLED_PRODUCT: YES

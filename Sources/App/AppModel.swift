@@ -70,6 +70,8 @@ final class AppModel: ObservableObject {
     @Published var interceptMode: InterceptMode = ConfigStore.shared.mode
     /// 规则包 #PORT 段是否参与拦截（1.2.3，默认关）
     @Published var portBlocking: Bool = ConfigStore.shared.portBlocking
+    /// 维护模式原因（nil = 正常）。服务端开启维护后，整个界面会被维护页盖住
+    @Published var maintenanceReason: String?
 
     let tunnel = TunnelController.shared
 
