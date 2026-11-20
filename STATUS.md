@@ -52,6 +52,18 @@
 | 5 | `storage/admin_initial.txt` 明文初始密码长期留存 | 已删；改为权限 600 且登录成功后自动清理 |
 | 6 | 旧版本 ipa 长期公开在 `/dl/` | 归档到 web 根外，只留最近两版 |
 
+### F. 发布（build 123）
+
+| 文件 | 大小 | SHA-256 |
+|---|---|---|
+| HeiMao_Pro_v1.2.4_build123_signed.ipa | 1,382,014 B | 37bad36c5f1f777a2886ab626b5266a44cf949691cd0db84ce7ca68ff6fca0a9 |
+| HeiMao_Pro_v1.2.4_build123_unsigned.ipa | 1,359,699 B | 6654dfd844be83a965a88b34e4a4edf6f55ff0b0016791998f95ed5514b4aa75 |
+
+- 双端 1.2.4 / 123，MinimumOSVersion 14.0，三端 755，框架带 _CodeSignature
+- 自校验锚点校验通过：签名包与未签名包的 `__TEXT,__text` 哈希一致（c8b235e8…），
+  说明 ldid / 巨魔 / ESign 这套重签流程不会触发看门狗的「改包」判定
+- 线上版本表 id=11 → 1.2.4 / 123（force_update=1），下载页自动显示最新 build
+
 ### E. 版本闸门
 
 后台可设「最低可用 build」：低于该值的客户端拿不到规则包（返回 `force_update`），
