@@ -93,15 +93,18 @@ jobs:
       - name: Package IPA
         run: |
           set -e
-          APP="$RUNNER_TEMP/HeiMaoInterceptor.xcarchive/Products/Applications/HeiMaoInterceptor.app"
-          if [ ! -d "$APP" ]; then
+          ARCH_APP="$RUNNER_TEMP/HeiMaoInterceptor.xcarchive/Products/Applications/HeiMaoInterceptor.app"
+          if [ ! -d "$ARCH_APP" ]; then
             echo "app not found, listing archive:"
             find "$RUNNER_TEMP/HeiMaoInterceptor.xcarchive" -maxdepth 4 -type d
             exit 1
           fi
           mkdir -p "$RUNNER_TEMP/Payload"
-          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          cp -R "$ARCH_APP" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
+          # 后面所有裁剪与校验都必须针对「真正要打进 ipa 的这份」，
+          # 之前误用了 archive 里那份，裁完 Payload 还是原样
+          APP="$RUNNER_TEMP/Payload/HeiMaoInterceptor.app"
 
           # ---- 去掉没有被引用的 Swift 兼容库 ----
           # Xcode 给 iOS14 目标的动态框架顺手塞了 libswift_Concurrency.dylib（7.7MB），
@@ -262,12 +265,15 @@ jobs:
           FW="$APP/Frameworks/HMKit.framework"
           if [ -d "$FW" ]; then
             echo "guard framework found" | tee -a "$SIGN_LOG"
-            if command -v ldid >/dev/null 2>&1; then
+            # 优先用 codesign 签整个 framework bundle：会生成 _CodeSignature/CodeResources，
+            # 第三方重签工具（ESign / 爱思）检查嵌套框架时更认这个结构
+            if command -v codesign >/dev/null 2>&1 && codesign -f -s - --timestamp=none "$FW" >>"$SIGN_LOG" 2>&1; then
+              echo "codesign framework OK" | tee -a "$SIGN_LOG"
+            elif command -v ldid >/dev/null 2>&1; then
               ldid -S "$FW/HMKit" 2>&1 | tee -a "$SIGN_LOG"
-            else
-              codesign -f -s - --timestamp=none "$FW/HMKit"
             fi
             chmod 755 "$FW/HMKit"
+            ls -la "$FW" | tee -a "$SIGN_LOG"
           else
             echo "WARN: HMKit.framework 未嵌入" | tee -a "$SIGN_LOG"
           fi
