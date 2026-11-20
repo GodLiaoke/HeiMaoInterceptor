@@ -32,6 +32,14 @@ def main():
         print("SEAL_VERIFY: FAIL %s != %s" % (val[:16], digest[:16]))
         return 1
 
+    # 结构标记必须在（主程序启动时会查这个，缺了就判篡改直接退出）
+    if b"HMTEXTAPP:" not in data:
+        print("SEAL_VERIFY: FAIL 看门狗里没有结构标记 HMTEXTAPP:")
+        return 1
+    if b"HMKITSZ:" not in open(app_bin, "rb").read():
+        print("SEAL_VERIFY: FAIL 主程序里没有框架标记 HMKITSZ:")
+        return 1
+
     size = sb.text_slice(kit_bin)
     if not size:
         print("SEAL_VERIFY: FAIL 读不到看门狗 __TEXT")
