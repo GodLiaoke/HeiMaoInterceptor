@@ -101,7 +101,7 @@ def main():
 
     kit_size = text_slice(kit_bin)[1]
     # 1) 框架大小写进主程序（等长 8 位十进制）
-    patch(main_bin, "HMKITSZ:", 8, str(kit_size))
+    patch(main_bin, "HMKITSZ:", 8, str(kit_size).zfill(8))  # 等长：不足 8 位补零
 
     # 2) 主程序定稿后算哈希
     digest = text_sha256(main_bin)

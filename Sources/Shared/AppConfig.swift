@@ -91,7 +91,8 @@ enum AppConfig {
     /// 前台心跳间隔（秒）
     static let pulseInterval: TimeInterval = 25
     /// 冷启动宽限：这段时间内允许还没连上过（正常网络启动几乎立刻成功）
-    static let pulseGrace: TimeInterval = 90
+    /// 给到 120 秒是照顾首次安装 + 弱网；过了这段时间还连不上就开始计数
+    static let pulseGrace: TimeInterval = 120
     /// 连续失败多少次判熔断（6 × 25s ≈ 150s）
     static let pulseMaxFails = 6
     /// 2 的幂次微调：给每次请求加一点随机抖动，避免整批设备同一秒打进来
