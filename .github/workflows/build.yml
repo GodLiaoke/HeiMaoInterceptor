@@ -204,6 +204,9 @@ jobs:
           SIGN_LOG="$RUNNER_TEMP/sign.log"
           : > "$SIGN_LOG"
 
+          # 说明：Frameworks 里的 libswift_Concurrency.dylib 来自工具链、自带有效签名，
+          # 不重新签（ldid 换成 ad-hoc 反而可能被库校验拒掉）。只签我们自己的看门狗。
+
           # 内嵌的看门狗框架（1.2.3）：先签它，且必须在扩展与主程序之前
           FW="$APP/Frameworks/HMGuardKit.framework"
           if [ -d "$FW" ]; then

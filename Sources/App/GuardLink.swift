@@ -19,6 +19,9 @@ enum GuardLink {
     private static var key: SymmetricKey?
     private static var lastGuardBeat: UInt64 = 0
     private static var lastGuardMoveAt = Date()
+    /// 是否见过看门狗心跳。没见到过就不按「停摆」判死 ——
+    /// 真被拔掉的情况主程序根本起不来（缺 LC_LOAD_DYLIB），不需要靠误判兜底。
+    private static var sawGuardBeat = false
 
     /// 共享密钥：主密钥 + 包名拼出来的，不进明文常量表
     private static var secret: String {
@@ -75,8 +78,9 @@ enum GuardLink {
             if beat != lastGuardBeat {
                 lastGuardBeat = beat
                 lastGuardMoveAt = Date()
+                sawGuardBeat = true
             }
-            let stalled = Date().timeIntervalSince(lastGuardMoveAt) > 6
+            let stalled = sawGuardBeat && Date().timeIntervalSince(lastGuardMoveAt) > 6
             lock.unlock()
 
             if got.isEmpty || got != expect || stalled {

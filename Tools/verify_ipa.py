@@ -58,8 +58,19 @@ def check(ipa: str):
         ei = plistlib.loads(z.read(ext_info[0]))
         print(f"  扩展={ei.get('CFBundleShortVersionString')} build={ei.get('CFBundleVersion')}")
 
+    def is_binary(n: str) -> bool:
+        base = n.rsplit("/", 1)[-1]
+        if n.endswith("/"):
+            return False
+        if base in ("PkgInfo", "Info.plist"):
+            return False
+        if base.lower().endswith((".plist", ".png", ".car", ".json", ".txt", ".entitlements")):
+            return False
+        return True
+
     exe = [n for n in names
-           if re.match(r"Payload/[^/]+\.app/[^/]+$", n) and n.rsplit(".", 1)[-1] not in ("plist", "png", "car", "PkgInfo")]
+           if re.match(r"Payload/[^/]+\.app/([^/]+|Frameworks/.+)$", n)
+           and is_binary(n)]
     ok = True
     for n in exe + [x for x in names if x.endswith(".appex/HeiMaoTunnel")]:
         info_z = z.getinfo(n)
