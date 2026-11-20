@@ -27,30 +27,30 @@ public final class HMGuard {
 
     // MARK: - 对外接口
 
-    /// 启动看门狗。`responder` 是主程序侧的应答函数，`breach` 是判定被改之后要做的事。
-    public static func start(secret: String,
-                             responder: @escaping (UInt32) -> String,
-                             breach: @escaping () -> Void) {
+    /// 启动（对外用无意义短名，符号表里看不出用途）
+    public static func k0(secret: String,
+                          responder: @escaping (UInt32) -> String,
+                          breach: @escaping () -> Void) {
         shared.begin(secret: secret, responder: responder, breach: breach)
     }
 
-    /// 主程序每秒报一次心跳（计数只增不减）
-    public static func beat(_ counter: UInt64) {
+    /// 心跳（计数只增不减）
+    public static func k1(_ counter: UInt64) {
         shared.lock.lock()
         shared.lastBeat = Date()
         shared.lock.unlock()
         _ = counter
     }
 
-    /// 看门狗自身的心跳值：主程序据此判断它还在跑
-    public static var heartbeat: UInt64 {
+    /// 看门狗自身的心跳值
+    public static var k2: UInt64 {
         shared.lock.lock()
         defer { shared.lock.unlock() }
         return shared.tick
     }
 
-    /// 看门狗用共享密钥对挑战做签名，主程序拿它跟自己算的比对
-    public static func sign(_ challenge: UInt32) -> String {
+    /// 用共享密钥对挑战做签名
+    public static func k3(_ challenge: UInt32) -> String {
         shared.signInternal(challenge)
     }
 

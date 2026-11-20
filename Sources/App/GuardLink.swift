@@ -1,10 +1,10 @@
 import Foundation
 import CryptoKit
-import HMGuardKit
+import HMKit
 
 /// 主程序侧的看门狗链路（1.2.3）
 ///
-/// 和 `HMGuardKit`（独立 dylib）互相盯着：
+/// 和内置的动态库互相盯着：
 ///   - 主程序每秒报心跳；停 6 秒，看门狗判主程序被挂起/被改
 ///   - 主程序每秒向看门狗要一次挑战签名，用同一算法复算；连续三次对不上就崩
 ///   - 看门狗自己的心跳不走，主程序同样判它被拔掉
@@ -41,11 +41,11 @@ enum GuardLink {
         lastGuardMoveAt = Date()
         lock.unlock()
 
-        HMGuard.start(secret: s,
-                      responder: { challenge in sign(challenge) },
-                      breach: breach)
+        HMGuard.k0(secret: s,
+                   responder: { challenge in sign(challenge) },
+                   breach: breach)
 
-        lastGuardBeat = HMGuard.heartbeat
+        lastGuardBeat = HMGuard.k2
 
         let thread = Thread { loop(breach) }
         thread.name = "hm.link"
@@ -67,12 +67,12 @@ enum GuardLink {
             let k = key
             lock.unlock()
 
-            HMGuard.beat(c)
+            HMGuard.k1(c)
 
             let challenge = UInt32.random(in: 1...UInt32.max)
             let expect = sign(challenge, key: k)
-            let got = HMGuard.sign(challenge)
-            let beat = HMGuard.heartbeat
+            let got = HMGuard.k3(challenge)
+            let beat = HMGuard.k2
 
             lock.lock()
             if beat != lastGuardBeat {
