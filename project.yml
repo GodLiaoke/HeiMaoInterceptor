@@ -26,6 +26,22 @@ settings:
     SWIFT_EMIT_LOC_STRINGS: NO
 
 targets:
+  HMGuardKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: Sources/Guard
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.heimao.guardkit
+        PRODUCT_NAME: HMGuardKit
+        INFOPLIST_FILE: Resources/Info-Guard.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+        MACH_O_TYPE: mh_dylib
+        DEFINES_MODULE: YES
+
   HeiMaoInterceptor:
     type: application
     platform: iOS
@@ -44,6 +60,8 @@ targets:
         PRODUCT_NAME: HeiMaoInterceptor
     dependencies:
       - target: HeiMaoTunnel
+        embed: true
+      - target: HMGuardKit
         embed: true
       - sdk: NetworkExtension.framework
       - sdk: Security.framework

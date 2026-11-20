@@ -74,6 +74,7 @@ final class AppModel: ObservableObject {
     let tunnel = TunnelController.shared
 
     private var timer: AnyCancellable?
+    private var opsTimer: AnyCancellable?
     private var renewTimer: AnyCancellable?
     private var tunnelObserver: AnyCancellable?
     private var resultTimer: AnyCancellable?
@@ -107,6 +108,10 @@ final class AppModel: ObservableObject {
         /* 先做一次运行环境自检：注入 / 调试 / 改包都会留痕，
            结论随授权请求一起上报，本地也据此决定授权要不要写盘 */
         Integrity.shared.evaluate()
+        /* 1.2.3：先按本地熔断钉子判一次（上次联网时钉下的结论，断网也照样生效） */
+        OpsService.enforcePinned()
+        /* 看门狗：主程序与内嵌 dylib 互相校验，任一侧被拔掉都直接退场 */
+        GuardLink.start { OpsService.die() }
         /* 功能校验的 CRC 组提前在后台算好，别卡在授权请求那一下 */
         WorkQueue.async { _ = FeatureProbe.all() }
 
@@ -145,6 +150,14 @@ final class AppModel: ObservableObject {
                 guard self.tunnel.isConnected else { return }
                 guard Date().timeIntervalSince(self.lastRenew) >= AppConfig.heartbeatInterval else { return }
                 self.refreshLicense(silent: true)
+            }
+
+        /* 运维状态定期刷新：云端开维护 / 开熔断之后，正在用的设备也要在几分钟内响应 */
+        opsTimer = Timer.publish(every: 240, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self, self.foreground else { return }
+                self.checkUpdate()
             }
 
         /* 启动即强校验：不信任本地缓存，先问服务端（全程后台） */
@@ -744,8 +757,17 @@ final class AppModel: ObservableObject {
             forceUpdate = true
         }
 
-        VersionService.shared.check(pin: pin) { [weak self] hasUpdate, force, info in
+        VersionService.shared.check(pin: pin) { [weak self] hasUpdate, force, info, ops in
             guard let self = self else { return }
+
+            /* 运维状态先落地：维护页与熔断跟版本弹窗互不影响 */
+            WorkQueue.main {
+                self.maintenanceReason = ops.maintenance
+                    ? (ops.maintenanceReason.isEmpty ? "系统维护中，请稍后再试" : ops.maintenanceReason)
+                    : nil
+            }
+            OpsService.enforce(ops)
+
             WorkQueue.main {
                 if hasUpdate, force, let info = info {
                     UpdatePin.pin(info)

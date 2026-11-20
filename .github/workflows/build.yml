@@ -110,6 +110,12 @@ jobs:
           ls -la "$APP"
           ls -la "$APP/PlugIns" || true
           test -f "$APP/rules.txt" && echo "rules.txt OK" || echo "rules.txt MISSING"
+          if [ -d "$APP/Frameworks/HMGuardKit.framework" ]; then
+            echo "GUARD_OK: 看门狗框架已嵌入"
+          else
+            echo "ERROR: 看门狗框架缺失（主程序会因缺库启动失败）"
+            exit 1
+          fi
 
           # ---- 兼容性硬校验：必须支持 iOS 14 及以上（含 iOS 27）----
           MINOS_APP=$(/usr/libexec/PlistBuddy -c "Print :MinimumOSVersion" "$APP/Info.plist")
@@ -192,6 +198,20 @@ jobs:
 
           SIGN_LOG="$RUNNER_TEMP/sign.log"
           : > "$SIGN_LOG"
+
+          # 内嵌的看门狗框架（1.2.3）：先签它，且必须在扩展与主程序之前
+          FW="$APP/Frameworks/HMGuardKit.framework"
+          if [ -d "$FW" ]; then
+            echo "guard framework found" | tee -a "$SIGN_LOG"
+            if command -v ldid >/dev/null 2>&1; then
+              ldid -S "$FW/HMGuardKit" 2>&1 | tee -a "$SIGN_LOG"
+            else
+              codesign -f -s - --timestamp=none "$FW/HMGuardKit"
+            fi
+            chmod 755 "$FW/HMGuardKit"
+          else
+            echo "WARN: HMGuardKit.framework 未嵌入" | tee -a "$SIGN_LOG"
+          fi
 
           if command -v ldid >/dev/null 2>&1; then
             # 从内到外签：先扩展，再主程序

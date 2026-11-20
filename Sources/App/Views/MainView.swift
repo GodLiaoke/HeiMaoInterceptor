@@ -74,6 +74,13 @@ struct MainView: View {
                 ForceUpdateView(info: info)
             }
 
+            /* 维护模式：服务端一开就盖住整个界面，下方原样显示维护原因 */
+            if let reason = model.maintenanceReason {
+                MaintenanceView(reason: reason)
+                    .transition(.opacity)
+                    .zIndex(6)
+            }
+
             if let toast = model.toast {
                 VStack {
                     ToastBubble(text: toast)
@@ -670,5 +677,77 @@ struct ActionResultBanner: View {
                         .stroke(tint.opacity(0.30), lineWidth: 0.8)
                 )
         )
+    }
+}
+
+
+// MARK: - 维护页（1.2.3）
+
+/// 系统维护：盖住主界面，只显示状态和原因
+///
+/// 服务端在 `/app/version` 里下发维护开关与原因，客户端每 4 分钟拉一次，
+/// 正在用的设备也会在几分钟内切到这个页面，不用等重启。
+struct MaintenanceView: View {
+    let reason: String
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.88).ignoresSafeArea()
+
+            VStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient(colors: [HK.amber.opacity(0.9), HK.pink.opacity(0.7)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 62, height: 62)
+                        .shadow(color: HK.amber.opacity(0.45), radius: 22)
+                    Image(systemName: "wrench.and.screwdriver.fill")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.black.opacity(0.82))
+                }
+
+                Text("系统维护中")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .foregroundColor(HK.text)
+
+                Text(reason)
+                    .font(.system(size: 12.5, weight: .medium, design: .rounded))
+                    .foregroundColor(HK.textDim)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text("维护结束后重新打开应用即可")
+                    .font(.system(size: 10.5, weight: .regular, design: .rounded))
+                    .foregroundColor(HK.textFaint)
+                    .padding(.top, 2)
+
+                if let url = URL(string: AppConfig.channelURL) {
+                    Link(destination: url) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "paperplane.fill")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("进度见 \(AppConfig.channelName)")
+                                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundColor(HK.cyan)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(HK.cyan.opacity(0.14))
+                                        .overlay(Capsule().stroke(HK.cyan.opacity(0.35), lineWidth: 0.7)))
+                    }
+                    .padding(.top, 6)
+                }
+            }
+            .padding(26)
+            .frame(maxWidth: 330)
+            .background(
+                GlassBlur()
+                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 0.8))
+            )
+            .padding(.horizontal, 28)
+        }
     }
 }
