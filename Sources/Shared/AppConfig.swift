@@ -8,7 +8,7 @@ enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
     static let appVersion     = "1.2.3"
-    static let buildNumber    = 121          // 1.2.3 build121（iOS14 弹窗修复 / 拦截模式可选 / 状态行不再截断）
+    static let buildNumber    = 122          // 1.2.3 build122（同 121，去掉包里没用到的 Swift 兼容库，修重签失败）
     static let apiBase        = Obfs.join(0, 1)
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"

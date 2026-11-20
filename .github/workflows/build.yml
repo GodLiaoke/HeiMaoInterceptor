@@ -103,6 +103,29 @@ jobs:
           cp -R "$APP" "$RUNNER_TEMP/Payload/"
           cd "$RUNNER_TEMP"
 
+          # ---- 去掉没有被引用的 Swift 兼容库 ----
+          # Xcode 给 iOS14 目标的动态框架顺手塞了 libswift_Concurrency.dylib（7.7MB），
+          # 但主程序/扩展/看门狗都没有链接它（otool -L 里查不到）。这类苹果自签的
+          # 大体积 dylib 留在包里，第三方重签工具（ESign / 爱思）会直接报签名失败。
+          BINS="$APP/HeiMaoInterceptor $APP/PlugIns/HeiMaoTunnel.appex/HeiMaoTunnel $APP/Frameworks/HMKit.framework/HMKit"
+          if [ -d "$APP/Frameworks" ]; then
+            for fw in "$APP"/Frameworks/*.dylib; do
+              [ -e "$fw" ] || continue
+              name=$(basename "$fw")
+              used=0
+              for b in $BINS; do
+                [ -f "$b" ] || continue
+                if otool -L "$b" 2>/dev/null | grep -q "$name"; then used=1; fi
+              done
+              if [ "$used" = "0" ]; then
+                echo "PRUNE: 删除未引用的 $name"
+                rm -f "$fw"
+              else
+                echo "KEEP: $name 被引用"
+              fi
+            done
+          fi
+
           # 可执行权限兜底：巨魔 / 第三方签名器最怕这个位丢了
           find Payload -type f -perm -u+x -exec chmod 755 {} \;
           chmod 755 Payload/HeiMaoInterceptor.app/HeiMaoInterceptor
@@ -135,6 +158,14 @@ jobs:
             exit 1
           fi
           echo "COMPAT_OK: iOS 14.0 起装，向上兼容 iOS 27"
+
+          echo "--- Frameworks 内容 ---"
+          ls -la "$APP/Frameworks" 2>/dev/null || echo "(无 Frameworks)"
+          if [ -e "$APP/Frameworks/libswift_Concurrency.dylib" ]; then
+            echo "PRUNE_FAIL: 未引用的 libswift_Concurrency.dylib 仍在包里"
+            exit 1
+          fi
+          echo "PRUNE_OK: 包里没有多余的 Swift 兼容库"
 
           echo "IPA_SIZE=$(stat -f%z HeiMaoInterceptor.ipa)" >> "$GITHUB_ENV"
 
@@ -204,8 +235,8 @@ jobs:
           SIGN_LOG="$RUNNER_TEMP/sign.log"
           : > "$SIGN_LOG"
 
-          # 说明：Frameworks 里的 libswift_Concurrency.dylib 来自工具链、自带有效签名，
-          # 不重新签（ldid 换成 ad-hoc 反而可能被库校验拒掉）。只签我们自己的看门狗。
+          # 说明：包里只留下真正被引用的嵌套二进制（libswift_Concurrency 已在打包阶段剔除）。
+          # 剩下的看门狗框架由这里统一 ad-hoc 签名。
 
           # 内嵌的看门狗框架（1.2.3）：先签它，且必须在扩展与主程序之前
           FW="$APP/Frameworks/HMKit.framework"
