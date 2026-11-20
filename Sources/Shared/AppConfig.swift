@@ -7,8 +7,8 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
-    static let appVersion     = "1.2.3"
-    static let buildNumber    = 122          // 1.2.3 build122（同 121，去掉包里没用到的 Swift 兼容库，修重签失败）
+    static let appVersion     = "1.2.4"
+    static let buildNumber    = 123          // 1.2.4 build123
     static let apiBase        = Obfs.join(0, 1)
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
@@ -81,4 +81,19 @@ enum AppConfig {
     static let v4AadReq  = Obfs.s(30)
     static let v4AadRes  = Obfs.s(31)
     static let v4SigTag  = Obfs.s(32)
+
+    /* ── 1.2.4 防破解心跳 ─────────────────────────────────────────
+       一条独立于卡密的小请求：只要「能连上验证站」就说明设备在正常网络里。
+       拿不到结果（断网 / 被劫持 / 被改包后连不上）连续到阈值就按熔断处理。
+       路径与间隔都在这里集中，方便以后调整。 */
+    static let pulseRoute      = Obfs.s(34)
+    static let burstRoute      = Obfs.s(35)
+    /// 前台心跳间隔（秒）
+    static let pulseInterval: TimeInterval = 25
+    /// 冷启动宽限：这段时间内允许还没连上过（正常网络启动几乎立刻成功）
+    static let pulseGrace: TimeInterval = 90
+    /// 连续失败多少次判熔断（6 × 25s ≈ 150s）
+    static let pulseMaxFails = 6
+    /// 2 的幂次微调：给每次请求加一点随机抖动，避免整批设备同一秒打进来
+    static let pulseJitter: TimeInterval = 6
 }

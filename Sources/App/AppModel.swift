@@ -68,8 +68,11 @@ final class AppModel: ObservableObject {
     @Published var licenseInput: String = ""
     /// 拦截模式：规则 / 全局（1.2.3）
     @Published var interceptMode: InterceptMode = ConfigStore.shared.mode
-    /// 规则包 #PORT 段是否参与拦截（1.2.3，默认关）
-    @Published var portBlocking: Bool = ConfigStore.shared.portBlocking
+    /// 规则包 #PORT 段是否参与拦截（1.2.4）
+    ///
+    /// 不再给用户开关：全局模式下自动打开，规则模式下自动关闭。
+    /// 这一项在设置页也不显示 —— 它是实现细节，不该出现在用户面前。
+    var portBlocking: Bool { interceptMode == .global }
     /// 维护模式原因（nil = 正常）。服务端开启维护后，整个界面会被维护页盖住
     @Published var maintenanceReason: String?
 
@@ -93,6 +96,9 @@ final class AppModel: ObservableObject {
     /// 续期守护：曾经开过防护、现在断了，就自己拉回来
     private var lastAutoStart = Date.distantPast
     private var autoStartCount = 0
+    /// 看门狗二次校验：上次核过的卡密 + 结论
+    private var lastVerifiedCode = ""
+    private var cardSealOK = false
 
     /// 用户上一次的意图：开 or 关。自动重连只在这个为 true 时做，
     /// 用户自己点了关闭就不会被系统「热心」地重新拉起来。
@@ -110,12 +116,24 @@ final class AppModel: ObservableObject {
         /* 先做一次运行环境自检：注入 / 调试 / 改包都会留痕，
            结论随授权请求一起上报，本地也据此决定授权要不要写盘 */
         Integrity.shared.evaluate()
-        /* 1.2.3：先按本地熔断钉子判一次（上次联网时钉下的结论，断网也照样生效） */
-        OpsService.enforcePinned()
+        /* 1.2.4：本地熔断钉子只取出来挂着，不在这里执行 ——
+           真正的结论交给心跳问云端：后台把熔断关掉，客户端下一次心跳就恢复；
+           连不上到阈值才崩。解决「后台关了客户端还崩」的老毛病。 */
+        OpsService.bootstrap()
         /* 看门狗：主程序与内嵌 dylib 互相校验，任一侧被拔掉都直接退场 */
         GuardLink.start { OpsService.die() }
         /* 功能校验的 CRC 组提前在后台算好，别卡在授权请求那一下 */
         WorkQueue.async { _ = FeatureProbe.all() }
+
+        /* 1.2.4 防破解心跳：独立于卡密的一条轻请求，25 秒一次。
+           它同时承担运维状态下发 —— 维护 / 熔断从此是「秒级」生效。 */
+        PulseService.shared.onState = { [weak self] ops in
+            guard let self = self else { return }
+            self.maintenanceReason = ops.maintenance
+                ? (ops.maintenanceReason.isEmpty ? "系统维护中，请稍后再试" : ops.maintenanceReason)
+                : nil
+        }
+        PulseService.shared.start(pin: ConfigStore.makePin())
 
         refreshRules()
         refreshLocal()
@@ -173,6 +191,9 @@ final class AppModel: ObservableObject {
     /// 进后台：只把最后一笔状态落盘，然后停止一切定时任务（反正会被冻结）
     func applicationDidEnterBackground() {
         foreground = false
+        /* 进后台主线程定时器会被冻住，心跳计数继续只会误杀；
+           交给回前台的补发 + 隧道扩展的在线心跳 */
+        PulseService.shared.setForeground(false)
         /* 申请一小段后台时间，把「刚收发的统计」「当前授权」落稳，
            顺便把下一次心跳提前发掉 —— 这样后台闲置很长时间后回来，
            服务端窗口也还没过期，不用等一次完整校验才恢复。 */
@@ -185,6 +206,8 @@ final class AppModel: ObservableObject {
     /// 回前台：立刻补一次校验，并把自动重连的节流窗口复位
     func applicationWillEnterForeground() {
         foreground = true
+        /* 回前台补一次心跳：后台期间云端可能刚开了维护或关了熔断 */
+        PulseService.shared.setForeground(true)
         endBackgroundWindow()
         lastAutoStart = .distantPast
         autoStartCount = 0
@@ -313,9 +336,10 @@ final class AppModel: ObservableObject {
                 }
                 if force {
                     let c = self.ruleCounts
-                    var detail = "IP \(c.ips) / 域名 \(c.domains)"
-                    if self.rulePorts > 0 { detail += " / 端口 \(self.rulePorts)" }
-                    let sets = self.ruleSets.isEmpty ? "" : " · \(self.ruleSetCount) 套：\(self.ruleSets.joined(separator: " / "))"
+                    /* 1.2.4：只报总量，不报 IP / 域名 / 端口分项 —— 分项等于把规则包
+                       的段结构摊给用户看，属于内部实现。 */
+                    let detail = "共 \(c.ips + c.domains) 条"
+                    let sets = self.ruleSets.isEmpty ? "" : " · \(self.ruleSetCount) 套"
                     self.publishResult("规则已更新\(sets)（\(detail)）")
                 }
                 completion?(true)
@@ -355,7 +379,26 @@ final class AppModel: ObservableObject {
 
     func refreshLocal() {
         license = ConfigStore.shared.license
-        let ok = license.isUsable()
+        var ok = license.isUsable()
+
+        /* 1.2.4：看门狗二次校验。
+           本地授权状态说「可用」还不够 —— 卡密要再交给 HMKit 里那套**独立实现**
+           验一遍格式与派生值。主程序里这段校验被 patch 掉，这里就对不上，
+           直接按未授权处理。同一串卡密只算一次，不重复做哈希。 */
+        let code = license.code
+        if ok, !code.isEmpty {
+            if code != lastVerifiedCode {
+                lastVerifiedCode = code
+                cardSealOK = GuardLink.verifyCard(code, pin: pin)
+            } else {
+                cardSealOK = GuardLink.cardVerified
+            }
+            if !cardSealOK {
+                ok = false
+                authAlert = "授权校验未通过，请重新激活"
+            }
+        }
+
         authorized = ok
         if ok {
             authAlert = nil
@@ -731,23 +774,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// #PORT 段开关：同样要重连才生效
-    func setPortBlocking(_ on: Bool) {
-        guard portBlocking != on else { return }
-        ConfigStore.shared.portBlocking = on
-        portBlocking = on
-        if tunnel.isConnected {
-            toast = on ? "端口拦截已开启，正在重新应用…" : "端口拦截已关闭，正在重新应用…"
-            switching = true
-            tunnel.restart()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
-                self?.switching = false
-            }
-        } else {
-            publishResult(on ? "端口拦截已开启（核心端口仍然放行）" : "端口拦截已关闭")
-        }
-    }
-
     // MARK: - 版本
 
     func checkUpdate() {
@@ -768,7 +794,7 @@ final class AppModel: ObservableObject {
                     ? (ops.maintenanceReason.isEmpty ? "系统维护中，请稍后再试" : ops.maintenanceReason)
                     : nil
             }
-            OpsService.enforce(ops)
+            OpsService.apply(ops)
 
             WorkQueue.main {
                 if hasUpdate, force, let info = info {

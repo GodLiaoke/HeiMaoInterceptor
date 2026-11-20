@@ -65,9 +65,10 @@ struct RulesDetailView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.presentationMode) var presentation
 
-    private var mergedIPs: Int { model.ruleCounts.ips }
-    private var mergedDomains: Int { model.ruleCounts.domains }
-    private var mergedPorts: Int { model.rulePorts }
+    /// 1.2.4：只报「总条目数」。
+    /// IP / 域名 / 端口的分项对应规则包的段结构（#IP / #DOMAIN / #PORT），
+    /// 属于内部实现，不往用户面前摆。
+    private var totalEntries: Int { model.ruleCounts.ips + model.ruleCounts.domains }
 
     var body: some View {
         ZStack {
@@ -160,9 +161,8 @@ struct RulesDetailView: View {
                 DividerLine()
 
                 HStack(spacing: 10) {
-                    CountCell(value: mergedIPs, label: "IP", tint: HK.cyan)
-                    CountCell(value: mergedDomains, label: "域名", tint: HK.violet)
-                    CountCell(value: mergedPorts, label: "端口", tint: HK.mint)
+                    CountCell(value: totalEntries, label: "规则条目", tint: HK.cyan)
+                    CountCell(value: model.ruleSetCount, label: "规则集", tint: HK.violet)
                 }
 
                 DividerLine()
@@ -223,10 +223,7 @@ struct RulesDetailView: View {
                     .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                     .foregroundColor(HK.text)
                     .fixedSize(horizontal: false, vertical: true)
-                if let c = counts {
-                    Text("\(c.0) IP · \(c.1) 域名 · \(c.2) 端口")
-                        .font(.system(size: 10.5, weight: .regular, design: .rounded))
-                        .foregroundColor(HK.textFaint)
+                if counts != nil {
                     if !version.isEmpty {
                         Text("版本 \(version)")
                             .font(.system(size: 9.5, weight: .regular, design: .monospaced))

@@ -105,6 +105,7 @@ jobs:
           # 后面所有裁剪与校验都必须针对「真正要打进 ipa 的这份」，
           # 之前误用了 archive 里那份，裁完 Payload 还是原样
           APP="$RUNNER_TEMP/Payload/HeiMaoInterceptor.app"
+          echo "SEAL_APP=$APP" >> "$GITHUB_ENV"
 
           # ---- 去掉没有被引用的 Swift 兼容库 ----
           # Xcode 给 iOS14 目标的动态框架顺手塞了 libswift_Concurrency.dylib（7.7MB），
@@ -154,9 +155,20 @@ jobs:
           chmod 755 Payload/HeiMaoInterceptor.app/HeiMaoInterceptor
           chmod 755 Payload/HeiMaoInterceptor.app/PlugIns/HeiMaoTunnel.appex/HeiMaoTunnel
 
+          # ---- 1.2.4 看门狗互校验：把构建期才知道的两个值写进二进制 ----
+          # 主程序写「看门狗 __TEXT 段大小」，看门狗写「主程序 __TEXT 段哈希」。
+          # 必须在签名之前做：签名只改 __LINKEDIT，不会破坏这里算出的哈希。
+          # 任何一个占位符没写进去，后面 verify 步骤会直接 fail。
+          python3 "$GITHUB_WORKSPACE/Tools/seal_binaries.py" "$APP"
+          echo "SEAL_DONE"
+
+          # 复核：看门狗里写的哈希必须等于主程序当前的 __TEXT 哈希
+          python3 "$GITHUB_WORKSPACE/Tools/verify_seal.py" "$APP"
+
           zip -qryX HeiMaoInterceptor.ipa Payload
           ls -lh HeiMaoInterceptor.ipa
           unzip -l HeiMaoInterceptor.ipa | head -30
+
           echo "--- bundle check ---"
           ls -la "$APP"
           ls -la "$APP/PlugIns" || true
@@ -238,6 +250,7 @@ jobs:
         run: |
           set -e
           APP="$RUNNER_TEMP/Payload/HeiMaoInterceptor.app"
+          echo "SEAL_APP=$APP" >> "$GITHUB_ENV"
           APPEX="$APP/PlugIns/HeiMaoTunnel.appex"
 
           if ! command -v ldid >/dev/null 2>&1; then

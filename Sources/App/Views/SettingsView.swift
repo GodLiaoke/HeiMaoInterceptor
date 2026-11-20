@@ -210,6 +210,12 @@ struct SettingsView: View {
 
     // MARK: - 规则
 
+    /// 规则卡只给「用户需要知道的」：来源、套数、版本、模式。
+    ///
+    /// 1.2.4：删掉了 IP / 域名 / 端口的分项条数、规则集名字和「端口段拦截」开关。
+    /// 那些是规则包内部结构（#IP / #DOMAIN / #PORT / #DIRECT 段），
+    /// 露在界面上既容易被拿去做指纹，也让人误以为要自己调。
+    /// 端口段现在由模式决定：全局模式开、规则模式关，用户不需要也不该看见这个开关。
     private var rulesCard: some View {
         VStack(spacing: 9) {
             SectionHeader(title: "规则库", subtitle: "RULES")
@@ -217,50 +223,16 @@ struct SettingsView: View {
                 VStack(spacing: 12) {
                     InfoRow(title: "来源", value: model.ruleSource)
                     InfoRow(title: "规则集", value: model.ruleSetCount > 0 ? "\(model.ruleSetCount) 套" : "—")
-                    if !model.ruleSets.isEmpty {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("下发内容")
-                                .font(.system(size: 11, weight: .regular, design: .rounded))
-                                .foregroundColor(HK.textFaint)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            FlowChips(items: model.ruleSets)
-                        }
-                    }
-                    InfoRow(title: "IP 规则", value: "\(model.ruleCounts.ips) 条")
-                    InfoRow(title: "域名规则", value: "\(model.ruleCounts.domains) 条")
-                    InfoRow(title: "端口规则", value: "\(model.rulePorts) 条")
                     InfoRow(title: "拦截模式", value: model.interceptMode.title)
-
-                    /* #PORT 段以前只解析不生效。新 beta 规则里这一带有 2650 个端口，
-                       其中含 53/80/443 —— 直接全网封会当场断网，所以做成开关，
-                       默认关；打开后核心端口（AppConfig.corePorts）照样放行。 */
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack(spacing: 8) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("端口段拦截")
-                                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                                    .foregroundColor(HK.text)
-                                Text("按规则包 #PORT 段拦端口，核心端口始终放行")
-                                    .font(.system(size: 9.5, weight: .regular, design: .rounded))
-                                    .foregroundColor(HK.textFaint)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: 4)
-                            Toggle("", isOn: Binding(
-                                get: { model.portBlocking },
-                                set: { model.setPortBlocking($0) }
-                            ))
-                            .labelsHidden()
-                            .toggleStyle(SwitchToggleStyle(tint: HK.cyan))
-                        }
-                    }
                     InfoRow(title: "下发版本", value: model.ruleVersionText, mono: true)
+
                     DividerLine()
+
                     HStack(spacing: 10) {
                         Button {
                             model.runQuickAction(.rules)
                         } label: {
-                            Text("同步云端规则")
+                            Text(model.rulesLoading ? "同步中…" : "同步云端规则")
                                 .font(.system(size: 12.5, weight: .semibold, design: .rounded))
                                 .foregroundColor(HK.cyan)
                                 .frame(maxWidth: .infinity)
@@ -268,6 +240,8 @@ struct SettingsView: View {
                                 .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
                                                 .fill(HK.cyan.opacity(0.12)))
                         }
+                        .disabled(model.rulesLoading)
+
                         Button {
                             model.runQuickAction(.notice)
                         } label: {
