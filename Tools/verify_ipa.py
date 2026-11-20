@@ -62,6 +62,10 @@ def check(ipa: str):
         base = n.rsplit("/", 1)[-1]
         if n.endswith("/"):
             return False
+        # _CodeSignature 里是 CodeResources（签名清单），不是可执行文件，
+        # 拿 755 去要求它必然误报
+        if "/_CodeSignature/" in n:
+            return False
         if base in ("PkgInfo", "Info.plist"):
             return False
         if base.lower().endswith((".plist", ".png", ".car", ".json", ".txt", ".entitlements")):
