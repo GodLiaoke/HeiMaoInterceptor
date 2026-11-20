@@ -64,31 +64,15 @@ enum KitSeal {
         defer { try? fh.close() }
         guard let all = try? fh.read(upToCount: 8 * 1024 * 1024), !all.isEmpty else { return nil }
         let bytes = [UInt8](all)
-        guard let idx = find(bytes) else { return nil }
+        guard let idx = firstIndex(bytes) else { return nil }
         let start = idx + markBytes.count
         guard start + 64 <= bytes.count else { return nil }
         return String(bytes: bytes[start..<(start + 64)], encoding: .ascii)
     }
 
-    /// 在文件里找标记串（分块扫，避免把整个二进制读进内存）
-    private static func containsMark(path: String) -> Bool {
-        guard let fh = FileHandle(forReadingAtPath: path) else { return false }
-        defer { try? fh.close() }
-        let chunkSize = 128 * 1024
-        let overlap = markBytes.count - 1
-        var carry = [UInt8]()
-        while true {
-            guard let chunk = try? fh.read(upToCount: chunkSize), !chunk.isEmpty else { break }
-            var buf = carry
-            buf.append(contentsOf: chunk)
-            if find(buf) { return true }
-            carry = Array(buf.suffix(max(0, overlap)))
-        }
-        return false
-    }
-
-    private static func find(_ hay: [UInt8]) -> Bool {
-        guard hay.count >= markBytes.count else { return false }
+    /// 返回标记串在字节流里的起始下标
+    private static func firstIndex(_ hay: [UInt8]) -> Int? {
+        guard hay.count >= markBytes.count else { return nil }
         let first = markBytes[0]
         var i = 0
         let limit = hay.count - markBytes.count
@@ -96,10 +80,10 @@ enum KitSeal {
             if hay[i] == first {
                 var j = 1
                 while j < markBytes.count, hay[i + j] == markBytes[j] { j += 1 }
-                if j == markBytes.count { return true }
+                if j == markBytes.count { return i }
             }
             i += 1
         }
-        return false
+        return nil
     }
 }
