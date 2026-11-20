@@ -16,6 +16,8 @@ final class ConfigStore {
     private let defaults = UserDefaults.standard
     private let licenseKey = "hm.license.v1"
     private let statsKey   = "hm.stats.v1"
+    private let modeKey    = "hm.mode.v1"
+    private let portBlockKey = "hm.port.block.v1"
 
     private let lock = NSRecursiveLock()
     private var _license: LicenseState
@@ -135,6 +137,21 @@ final class ConfigStore {
 
     var cloudNotice: String? { nil }
 
+    // MARK: - 拦截模式（1.2.3）
+
+    /// 规则模式 / 全局模式。默认规则模式 —— 用户反馈的「开了就断网」
+    /// 就是默认全接管造成的，新装用户从规则模式起步不会一上来就上不了网。
+    var mode: InterceptMode {
+        get { InterceptMode.from(defaults.string(forKey: modeKey)) }
+        set { defaults.set(newValue.rawValue, forKey: modeKey) }
+    }
+
+    /// 规则包 #PORT 段是否参与拦截（默认关，见 AppConfig.corePorts 的说明）
+    var portBlocking: Bool {
+        get { defaults.bool(forKey: portBlockKey) }
+        set { defaults.set(newValue, forKey: portBlockKey) }
+    }
+
     // MARK: - 隧道参数
 
     /// 通过 providerConfiguration 传给扩展（不依赖 App Group，签名更省事）
@@ -159,7 +176,11 @@ final class ConfigStore {
             "dnsIP": AppConfig.dnsProxyIP,
             "clientIP": AppConfig.clientIP,
             "sinkholeIP": AppConfig.sinkholeIP,
-            "mtu": AppConfig.mtu
+            "mtu": AppConfig.mtu,
+            /* 1.2.3：拦截模式与端口段开关跟着配置一起进扩展。
+               切模式后重连一次即可生效，不需要重装。 */
+            "mode": mode.rawValue,
+            "portBlock": portBlocking
         ]
     }
 

@@ -59,6 +59,8 @@ final class TunnelEngine {
     private let flow: NEPacketTunnelFlow
     private let dnsIPv4: UInt32
     private let clientIPv4: UInt32
+    /// 规则包 #PORT 段是否参与拦截（1.2.3，默认关）
+    private let portBlocking: Bool
 
     /// 规则快照 + DNS 缓存共用一把锁。都是纳秒级操作，不排队、不切线程。
     private let stateLock = NSLock()
@@ -94,9 +96,11 @@ final class TunnelEngine {
     private var running = false
     private let runningLock = NSLock()
 
-    init(flow: NEPacketTunnelFlow, rules: RuleSet, dnsIP: String, clientIP: String) {
+    init(flow: NEPacketTunnelFlow, rules: RuleSet, dnsIP: String, clientIP: String,
+         portBlocking: Bool = false) {
         self.flow = flow
         self.rules = rules
+        self.portBlocking = portBlocking
         self.dnsIPv4 = RuleSet.ipToUInt(dnsIP) ?? 0x0A6F_0001
         self.clientIPv4 = RuleSet.ipToUInt(clientIP) ?? 0x0A6F_0002
     }
@@ -210,7 +214,7 @@ final class TunnelEngine {
                 handleDNS(p)
                 return
             }
-            if isBlocked(p.dstIP, port: Int(udp.dstPort)) {
+            if isBlocked(p.dstIP, port: Int(udp.dstPort)) || isPortBlocked(Int(udp.dstPort)) {
                 statsLock.lock()
                 stats.blockedPackets += 1
                 stats.blockedUDP += 1
@@ -222,7 +226,7 @@ final class TunnelEngine {
         }
 
         if p.proto == 6, let tcp = p.tcp {
-            if isBlocked(p.dstIP, port: Int(tcp.dstPort)) {
+            if isBlocked(p.dstIP, port: Int(tcp.dstPort)) || isPortBlocked(Int(tcp.dstPort)) {
                 dropTCP(p, key: PacketCodec.flowKey(p))
             } else {
                 statsLock.lock(); stats.stray += 1; statsLock.unlock()
@@ -265,6 +269,18 @@ final class TunnelEngine {
     private func isBlocked(_ ip: UInt32, port: Int) -> Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return rules.isBlockedIp(ip, port: port)
+    }
+
+    /// #PORT 段：只有开关打开才生效，且永远放过核心端口
+    ///
+    /// 新 beta 规则里这一带有 2650 个端口（含 53/80/443）。按端口全网封会当场断网，
+    /// 连授权通道（走 443）都过不去，所以核心端口写死不参与端口拦截。
+    private func isPortBlocked(_ port: Int) -> Bool {
+        guard portBlocking else { return false }
+        guard port > 0, port <= 65535 else { return false }
+        guard !AppConfig.corePorts.contains(port) else { return false }
+        stateLock.lock(); defer { stateLock.unlock() }
+        return rules.isPortBlocked(UInt16(port))
     }
 
     private func isDomainBlocked(_ domain: String) -> Bool {

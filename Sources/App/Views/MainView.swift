@@ -6,8 +6,15 @@ import Combine
 struct MainView: View {
 
     @EnvironmentObject var model: AppModel
-    @State private var showSettings = false
-    @State private var showRules = false
+
+    /// iOS 14 上同一个视图挂两个 `.sheet` 只会认最后一个 —— 设置页因此永远弹不出来。
+    /// 1.2.3 改成单一 `.sheet(item:)`，弹哪个由这个枚举决定。
+    enum ActiveSheet: String, Identifiable {
+        case settings, rules
+        var id: String { rawValue }
+    }
+
+    @State private var activeSheet: ActiveSheet?
     @State private var appear = false
 
     var body: some View {
@@ -38,7 +45,7 @@ struct MainView: View {
                                     actionTitle: model.license.code.isEmpty ? "输入卡密" : "刷新状态",
                                     action: {
                                         if model.license.code.isEmpty {
-                                            showSettings = true
+                                            activeSheet = .settings
                                         } else {
                                             model.verifyNow { _ in }
                                         }
@@ -50,7 +57,9 @@ struct MainView: View {
 
                     quickStats
 
-                    RuleSetsStrip { showRules = true }
+                    modeSelector
+
+                    RuleSetsStrip { activeSheet = .rules }
 
                     licenseCard
                     statsSection
@@ -79,15 +88,27 @@ struct MainView: View {
                 }
             }
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView().environmentObject(model)
-        }
-        .sheet(isPresented: $showRules) {
-            RulesDetailView().environmentObject(model)
+        /* 只留这一个挂载点：iOS 14 的 SwiftUI 同一视图挂两个 sheet，
+           只有最后一个会生效（设置页因此打不开）。改成 item 版，
+           弹哪个由 activeSheet 决定，14/15 都一样。 */
+        .sheet(item: $activeSheet) { sheet in
+            Group {
+                switch sheet {
+                case .settings: SettingsView().environmentObject(model)
+                case .rules:    RulesDetailView().environmentObject(model)
+                }
+            }
         }
         // 设置里点了刷新：收起设置页，结果在主界面顶部看
         .onReceive(model.$closeSettingsRequest.compactMap { $0 }) { _ in
-            withAnimation(.easeInOut(duration: 0.22)) { showSettings = false }
+            withAnimation(.easeInOut(duration: 0.22)) { activeSheet = nil }
+        }
+        /* 未激活时点圆球 / 点「输入卡密」，统一弹设置页 */
+        .onChange(of: model.showLicense) { wants in
+            if wants {
+                activeSheet = .settings
+                model.showLicense = false
+            }
         }
         /* iOS 14 只有 .alert(isPresented:content:) 这一套；
            带 role 的按钮 + message 闭包是 iOS 15 的写法，降到 14 会编译不过。 */
@@ -158,7 +179,7 @@ struct MainView: View {
 
             Button {
                 model.loadAnnouncement()
-                showSettings = true
+                activeSheet = .settings
             } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.system(size: 15, weight: .semibold))
@@ -232,13 +253,82 @@ struct MainView: View {
 
     private var statusDetail: String {
         if model.tunnel.isConnected {
-            return "已拦截 \(model.blockedText) 个请求 · 运行 \(model.uptimeText)"
+            return "\(model.interceptMode.shortTitle)模式 · 已拦截 \(model.blockedText) 个请求 · 运行 \(model.uptimeText)"
         }
         if !model.authorized {
             return model.license.code.isEmpty ? "请先在设置里输入卡密激活"
                                               : "卡密状态异常，点上方刷新或重新激活"
         }
-        return "轻触上方开关，只接管命中规则的连接"
+        return model.interceptMode == .global
+            ? "轻触上方开关，所有流量交给隧道判定"
+            : "轻触上方开关，只拦截命中规则的连接"
+    }
+
+    // MARK: - 拦截模式（1.2.3）
+
+    /// 规则 / 全局二选一。规则模式是默认档：只把规则命中的流量拉进隧道，
+    /// 其余流量维持原样，所以不会出现「一开防护就上不了网」。
+    private var modeSelector: some View {
+        VStack(spacing: 7) {
+            HStack(spacing: 8) {
+                ForEach(InterceptMode.allCases, id: \.id) { mode in
+                    modeButton(mode)
+                }
+            }
+            Text(model.interceptMode.detail)
+                .font(.system(size: 10, weight: .regular, design: .rounded))
+                .foregroundColor(HK.textFaint)
+                .multilineTextAlignment(.center)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 6)
+        }
+    }
+
+    private func modeButton(_ mode: InterceptMode) -> some View {
+        let selected = (model.interceptMode == mode)
+        let tint = (mode == .global) ? HK.amber : HK.cyan
+        return Button {
+            if model.interceptMode != mode {
+                let gen = UISelectionFeedbackGenerator()
+                gen.selectionChanged()
+                model.setMode(mode)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 11, weight: .bold))
+                    Text(mode.title)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                    Spacer(minLength: 0)
+                    if selected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10.5, weight: .bold))
+                    }
+                }
+                .foregroundColor(selected ? tint : HK.textDim)
+
+                Text(mode == .rules ? "只拦命中规则的" : "全部流量进隧道")
+                    .font(.system(size: 9.5, weight: .medium, design: .rounded))
+                    .foregroundColor(selected ? HK.textDim : HK.textFaint)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(selected ? tint.opacity(0.16) : Color.white.opacity(0.045))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                            .stroke(selected ? tint.opacity(0.45) : Color.white.opacity(0.10),
+                                    lineWidth: selected ? 0.9 : 0.7)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - 核心数据
@@ -301,11 +391,11 @@ struct MainView: View {
                     }
                     if !model.authorized {
                         GlassButton(title: "激活卡密", icon: "key.fill", tint: HK.amber) {
-                            showSettings = true
+                            activeSheet = .settings
                         }
                     } else {
                         GlassButton(title: "规则详情", icon: "list.bullet.rectangle", tint: HK.violet) {
-                            showRules = true
+                            activeSheet = .rules
                         }
                     }
                 }

@@ -66,6 +66,10 @@ final class AppModel: ObservableObject {
     @Published var toast: String?
     @Published var showLicense: Bool = false
     @Published var licenseInput: String = ""
+    /// 拦截模式：规则 / 全局（1.2.3）
+    @Published var interceptMode: InterceptMode = ConfigStore.shared.mode
+    /// 规则包 #PORT 段是否参与拦截（1.2.3，默认关）
+    @Published var portBlocking: Bool = ConfigStore.shared.portBlocking
 
     let tunnel = TunnelController.shared
 
@@ -691,6 +695,44 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: - 拦截模式（1.2.3）
+
+    /// 切换模式：落盘 → 隧道在跑就按新配置重连一次（约 2 秒断流）
+    func setMode(_ mode: InterceptMode) {
+        guard interceptMode != mode else { return }
+        ConfigStore.shared.mode = mode
+        interceptMode = mode
+
+        guard tunnel.isConnected else {
+            publishResult("已切换为\(mode.title) · \(mode.brief)")
+            return
+        }
+        /* 隧道已经在跑：配置是启动时带进去的，必须重连才会按新路由生效 */
+        toast = "已切换为\(mode.title)，正在重新应用…"
+        switching = true
+        tunnel.restart()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.switching = false
+        }
+    }
+
+    /// #PORT 段开关：同样要重连才生效
+    func setPortBlocking(_ on: Bool) {
+        guard portBlocking != on else { return }
+        ConfigStore.shared.portBlocking = on
+        portBlocking = on
+        if tunnel.isConnected {
+            toast = on ? "端口拦截已开启，正在重新应用…" : "端口拦截已关闭，正在重新应用…"
+            switching = true
+            tunnel.restart()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.switching = false
+            }
+        } else {
+            publishResult(on ? "端口拦截已开启（核心端口仍然放行）" : "端口拦截已关闭")
+        }
+    }
+
     // MARK: - 版本
 
     func checkUpdate() {
@@ -778,7 +820,7 @@ final class AppModel: ObservableObject {
         let stray = num("stray")
         let phase = (stats["phase"] as? String) ?? "running"
         let routes = (stats["routes"] as? String) ?? "—"
-        var line = "收包 \(tunnelPackets) · DNS \(dns) · 拦截 \(blocked)"
+        var line = "\(interceptMode.shortTitle)模式 · 收包 \(tunnelPackets) · DNS \(dns) · 拦截 \(blocked)"
         if stray > 0 { line += " · 旁路 \(stray)" }
         if let age = StatsBridge.age(stats) { line += " · 心跳 \(age)秒前" }
         /* 1.1.0 起是窄口模型：路由只覆盖规则段 + 假 DNS，不再有「补集装不下」的降级。

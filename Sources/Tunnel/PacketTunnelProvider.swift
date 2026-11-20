@@ -19,6 +19,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var routeInfo = ""
     /// true = 全接管（0.0.0.0/0 + 例外）；false = 窄口
     private var routeHijackAll = false
+    /// 拦截模式（1.2.3）：规则模式只接管规则段，全局模式全接管
+    private var mode: InterceptMode = .rules
+    /// 规则包 #PORT 段是否参与拦截（默认关）
+    private var portBlockEnabled = false
     /// 规则热更新要按新规则重算路由，这里留一份启动时的配置和 MTU
     private var lastConf: [String: Any] = [:]
     private var lastMTU = AppConfig.mtu
@@ -63,6 +67,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         pin  = (conf["pin"] as? String) ?? ""
         code = (conf["code"] as? String) ?? ""
+        /* 1.2.3：模式与端口开关跟着配置进来。老版本 App 不会带这两项，
+           缺省即规则模式 + 端口段关闭，正好是最不容易断网的那一档。 */
+        mode = InterceptMode.from(conf["mode"] as? String)
+        portBlockEnabled = (conf["portBlock"] as? Bool) ?? false
 
         /* 主程序把自己的 Documents 路径传过来了，统计就按这个路径写。
            这是跨进程最稳的一条通道：不依赖 App Group 容器有没有被系统建出来。 */
@@ -199,33 +207,36 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         let clientValue = RuleSet.ipToUInt(clientIP) ?? 0x0A6F_0002
         let keepInside = [dnsValue, clientValue]
 
-        /* 1.1.1：全接管 + 精确补集优先。
-           窄口模型（1.1.0）只把规则 IP 拽进隧道，iOS 在 split 隧道下经常不把
-           系统 DNS 交给隧道，域名规则等于没生效 —— 这是「拦不完整」的根因。
-           全接管让所有 DNS/TCP 都经过这里，非规则流量由 excludedRoutes 放回物理网卡。
-           阶梯：精确 → /24 → /20 → /16，哪一档装得下用哪一档。
-           精确档能保留「同网段邻居不受影响」，粗化档会多接管一点邻居地址。 */
+        /* 规则模式（1.2.3 默认）：
+           included = 规则里的 IP 段 + 假 DNS 的 /32，DNS 只接管「要拦的域名」。
+           规则外的流量压根不进隧道 —— 这是「开了防护还能正常上网」的关键。
+
+           阶梯：精确 → /24 → /20 → 只剩假 DNS。
+           规则 IP 特别多、系统装不下时逐级放宽，最差也保住域名拦截，
+           绝不会出现「隧道起不来 / 起来了又断网」。 */
+        var rulePlans: [RuleSet.RoutePlan] = [parsed.routePlan(forceInside: keepInside)]
+        for bits in [24, 20] {
+            rulePlans.append(parsed.routePlan(forceInside: keepInside, coarsenTo: bits))
+        }
+        var dnsOnly = RuleSet.RoutePlan()
+        dnsOnly.degraded = true
+        dnsOnly.included = [(dnsIP, 32)]
+        dnsOnly.matchDomains = parsed.dnsMatchDomains
+        rulePlans.append(dnsOnly)
+
+        guard mode == .global else { return rulePlans }
+
+        /* 全局模式：默认路由全接管 + 精确补集例外（非规则流量由 excludedRoutes 交回物理网卡）。
+           阶梯：精确 → /24 → /20，哪一档装得下用哪一档。
+           全都装不下时退回规则模式，而不是「把流量关进隧道再黑洞掉」——
+           后者就是用户反馈的「开了 VPN 直接断网」。 */
         var plans: [RuleSet.RoutePlan] = []
         for bits in [32, 24, 20] {
             if let full = parsed.fullRoutePlan(forceInside: keepInside, coarsenTo: bits) {
                 plans.append(full)
             }
         }
-
-        /* 兜底一：窄口（规则 IP 段 + 假 DNS）。
-           全接管补集装不下时用，保证至少 IP 规则能拦、也不会断网。 */
-        plans.append(parsed.routePlan(forceInside: keepInside))
-
-        /* 兜底二：规则段太碎（好几千条 /32）时逐级合并粒度再试 */
-        for bits in [24, 20, 16] {
-            plans.append(parsed.routePlan(forceInside: keepInside, coarsenTo: bits))
-        }
-
-        /* 兜底三：只留假 DNS，不做 IP 接管（退到最后也不能让用户断网） */
-        var dnsOnly = RuleSet.RoutePlan()
-        dnsOnly.degraded = true
-        dnsOnly.included = [(dnsIP, 32)]
-        plans.append(dnsOnly)
+        plans.append(contentsOf: rulePlans)
         return plans
     }
 
@@ -295,10 +306,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             NEIPv4Route(destinationAddress: $0.0,
                         subnetMask: PacketTunnelProvider.maskString($0.1))
         }
-        /* DNS 接管「所有域名」：matchDomains 放一个空串就是全部（ACE 的等价写法）。
-           窄路由此刻仍然成立 —— 假 DNS 的 /32 已在 includedRoutes 里。 */
+        /* DNS：全局模式接管所有域名（matchDomains = [""]），规则模式只接管
+           「规则里要拦的域名」—— 其它域名照走系统 DNS，速度和没开防护一样。
+           假 DNS 的 /32 已经在 includedRoutes 里，split 模式下查询也能进隧道。 */
         let dns = NEDNSSettings(servers: [dnsIP])
-        dns.matchDomains = [""]
+        dns.matchDomains = plan.matchDomains.isEmpty ? RuleSet.RoutePlan.noDomainSentinel
+                                                     : plan.matchDomains
+        /* 不把系统搜索域拼进来，避免把「qq.com」误配成「qq.com.local」之类 */
+        dns.matchDomainsNoSearch = true
         s.dnsSettings = dns
         s.ipv4Settings = v4
         return s
@@ -307,7 +322,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     /// 起引擎 + 心跳复查
     private func startEngine() {
         let engine = TunnelEngine(flow: packetFlow, rules: ruleSet,
-                                  dnsIP: dnsIP, clientIP: clientIP)
+                                  dnsIP: dnsIP, clientIP: clientIP,
+                                  portBlocking: portBlockEnabled)
         self.engine = engine
         startedAt = Date()
         phase = "running"
@@ -505,8 +521,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         payload["startedAt"] = Int(startedAt.timeIntervalSince1970)
         payload["rules"] = ruleSet.summary.ips + ruleSet.summary.domains
         payload["routes"] = routeInfo
-        payload["mode"] = "ace"
+        payload["mode"] = mode.rawValue
         payload["routeMode"] = routeHijackAll ? "full" : "narrow"
+        payload["portBlock"] = portBlockEnabled
         payload["routeCount"] = ruleSet.report.routes
         payload["phase"] = phase
         /* 注意：这里必须是 dnsServer，不能写 dns。

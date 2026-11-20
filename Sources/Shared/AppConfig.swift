@@ -7,8 +7,8 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
-    static let appVersion     = "1.2.2"
-    static let buildNumber    = 120          // 1.2.2 build120（后台常驻：心跳下沉扩展 / 切网自愈 / 不误断）
+    static let appVersion     = "1.2.3"
+    static let buildNumber    = 121          // 1.2.3 build121（iOS14 弹窗修复 / 拦截模式可选 / 状态行不再截断）
     static let apiBase        = Obfs.join(0, 1)
     static let channelURL     = "https://t.me/HeiMaoClub"
     static let channelName    = "@HeiMaoClub"
@@ -63,6 +63,13 @@ enum AppConfig {
     /// 统计落盘间隔（App 读不到消息回包时的兜底快照）
     /// 1.2.2：2 秒 → 10 秒。后台每 2 秒写一次盘，累计 I/O 会拖垮扩展。
     static let statsPublishInterval: TimeInterval = 10
+
+    /// 规则包 #PORT 段的开关（1.2.3）
+    ///
+    /// 端口段以前只解析、不参与判定。新 beta 规则里这一带有 2650 个端口，
+    /// 其中包含 53 / 80 / 443 —— 直接按端口全网封会当场断网（连授权通道都走 443）。
+    /// 所以做成用户可开可关，且无论开关如何，下面这几个端口永远不按端口封。
+    static let corePorts: Set<Int> = [22, 53, 80, 123, 443, 853, 8080, 8443]
 
     /// 云端规则包密钥派生参数（必须与服务端 RulesService 一致）
     static let rulesSalt = Obfs.join(6, 7)

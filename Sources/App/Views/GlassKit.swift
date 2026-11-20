@@ -305,19 +305,36 @@ struct InfoRow: View {
     let value: String
     var valueColor: Color = HK.text
     var mono: Bool = false
+    /// 长文本（拦截状态、下发说明这类）改成上下两行，值允许折行，不再被截断
+    var multiline: Bool = false
 
     var body: some View {
-        HStack {
-            Text(title)
-                .font(.system(size: 12.5, weight: .regular, design: .rounded))
-                .foregroundColor(HK.textDim)
-            Spacer()
-            Text(value)
-                .font(.system(size: 12.5, weight: .semibold,
-                              design: mono ? .monospaced : .rounded))
-                .foregroundColor(valueColor)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+        if multiline {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                    .foregroundColor(HK.textDim)
+                Text(value)
+                    .font(.system(size: 12, weight: .semibold,
+                                  design: mono ? .monospaced : .rounded))
+                    .foregroundColor(valueColor)
+                    .lineSpacing(2.5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            HStack {
+                Text(title)
+                    .font(.system(size: 12.5, weight: .regular, design: .rounded))
+                    .foregroundColor(HK.textDim)
+                Spacer()
+                Text(value)
+                    .font(.system(size: 12.5, weight: .semibold,
+                                  design: mono ? .monospaced : .rounded))
+                    .foregroundColor(valueColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
         }
     }
 }

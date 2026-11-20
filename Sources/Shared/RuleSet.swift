@@ -10,7 +10,9 @@ import Foundation
 ///   3. IP 行：`A.B.C.D` | `A.B.C.D/N` | `A.B.C.D:端口` | `A.B.C.D:起-止`，
 ///      逗号后缀 `,DIRECT` / `,ALLOW` 表示放行，其余一律当拦截
 ///   4. 域名行：去 `,DIRECT` → 转小写 → 去 http(s):// → 第一个 `/` 截断 → 去行首的点
-///   5. 端口行：只入集合，不参与判定（与原版一致）
+///   5. 端口行：只入集合，默认不参与判定（1.2.3 起可由用户开关，[AppConfig.corePorts] 永远放行）
+///   6. 放行段：`#DIRECT` / `#ALLOW` / `#WHITELIST`（服务端合并规则时统一追加 `#DIRECT`）
+///      里的域名与 IP 段一律放行，优先级高于拦截
 ///
 /// 兼容层：老格式（hosts / dnsmasq / AdGuard）照旧认得，避免历史规则包解析成空。
 ///
@@ -45,7 +47,7 @@ struct RuleSet {
     }
 
     private enum Section: Equatable {
-        case none, ip, domain, port
+        case none, ip, domain, port, direct
     }
 
     // MARK: - 解析结果
@@ -107,6 +109,7 @@ struct RuleSet {
             case .ip:     rs.addIpLine(body)
             case .domain: rs.addDomainLine(body)
             case .port:   rs.addPortLine(body)
+            case .direct: rs.addDirectLine(body)
             case .none:   break
             }
         }
@@ -129,8 +132,13 @@ struct RuleSet {
         t = t.trimmingCharacters(in: .whitespaces)
         let u = t.uppercased()
         if u.hasPrefix("IP") { return .ip }
-        if u.hasPrefix("DOMAIN") || u.hasPrefix("域名") { return .domain }
+        if u.hasPrefix("DOMAIN") || u.hasPrefix("HOST") || u.hasPrefix("域名") { return .domain }
         if u.hasPrefix("PORT") || u.hasPrefix("端口") { return .port }
+        /* 服务端合并规则时会把放行名单统一追加成 #DIRECT 段（旧站是 #ALLOW / #WHITELIST）。
+           以前这里不认这三个词：段头被当注释跳过，段里的域名却还留在上一个段里，
+           结果「放行」变成了「拦截」—— 白名单写进规则包就整片被误杀。 */
+        if u.hasPrefix("DIRECT") || u.hasPrefix("ALLOW") || u.hasPrefix("WHITELIST")
+            || u.hasPrefix("放行") || u.hasPrefix("白名单") { return .direct }
         return nil
     }
 
@@ -293,6 +301,28 @@ struct RuleSet {
 
         guard isValidDomain(t) else { return nil }
         return (t, direct)
+    }
+
+    // MARK: - 放行段（#DIRECT / #ALLOW / #WHITELIST）
+
+    /// 放行优先：写进这里的域名 / IP 段一律不拦，即使同时命中拦截名单
+    private mutating func addDirectLine(_ line: String) {
+        let tokens = line.split(whereSeparator: { $0 == " " || $0 == "\t" || $0 == "," })
+            .map(String.init)
+        guard !tokens.isEmpty else { return }
+        for token in tokens {
+            if let rule = RuleSet.parseIpRule(token) {
+                ipRules.append(IPRule(base: rule.base, prefix: rule.prefix,
+                                      portFrom: rule.portFrom, portTo: rule.portTo,
+                                      direct: true))
+                continue
+            }
+            if let parsed = RuleSet.parseDomain(token) {
+                insertDomain(parsed.0, direct: true)
+                continue
+            }
+            report.skipped += 1
+        }
     }
 
     // MARK: - 端口行
@@ -495,6 +525,9 @@ struct RuleSet {
     struct RoutePlan {
         var included: [(String, Int)] = []
         var excluded: [(String, Int)] = []
+        /// split DNS 后缀表：只有这些域名（含子域）的查询会走假 DNS
+        /// 全局模式下是 [""]（所有域名），规则模式下只放拦截域名
+        var matchDomains: [String] = [""]
         /// 保留字段：老逻辑的全接管方案，1.1.0 不再产生
         var hijackAll = false
         /// true = 连规则段都没接管上（只有 DNS）
@@ -502,11 +535,31 @@ struct RuleSet {
 
         var routeCount: Int { included.count + excluded.count }
 
+        /// 没有域名规则时用的哨兵：`matchDomains` 设成空数组在系统里等于「全部域名」，
+        /// 那样反而把全网 DNS 都拽进隧道；给一个永远不存在的域名最安全。
+        static let noDomainSentinel: [String] = ["hm-rule-off.invalid"]
+
         var description: String {
             if hijackAll { return "全接管 · 例外 \(excluded.count) 条" }
             if degraded { return "DNS 接管 · 无 IP 路由" }
-            return "规则接管 · 路由 \(included.count) 条"
+            if matchDomains.isEmpty || matchDomains == [""] {
+                return "规则接管 · 路由 \(included.count) 条"
+            }
+            return "规则接管 · 路由 \(included.count) 条 · 域名 \(matchDomains.count)"
         }
+    }
+
+    /// 规则模式下给 split DNS 用的后缀表
+    ///
+    /// 以前一刀切 `matchDomains = [""]`：所有 DNS 都塞进隧道转发，
+    /// 上游一慢或者某家上游在那个网络下不可达，用户就是「开了防护打不开网页」。
+    /// 规则模式只接管「需要拦的域名」，其它域名的 DNS 完全不动，上网速度和没开一样。
+    ///
+    /// 上限 1200 条：再多系统也没有必要全塞，超出部分仍然靠 IP 层与全局模式兜。
+    var dnsMatchDomains: [String] {
+        guard !domains.isEmpty else { return RoutePlan.noDomainSentinel }
+        if domains.count <= 1200 { return domains.sorted() }
+        return Array(domains.sorted().prefix(1200))
     }
 
     /// 全接管方案：included = 0.0.0.0/0，excluded =「规则段 + forceInside」的精确补集
@@ -585,6 +638,7 @@ struct RuleSet {
         }
 
         if plan.included.isEmpty { plan.degraded = true }
+        plan.matchDomains = dnsMatchDomains
         return plan
     }
 

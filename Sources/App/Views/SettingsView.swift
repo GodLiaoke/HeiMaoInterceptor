@@ -229,6 +229,31 @@ struct SettingsView: View {
                     InfoRow(title: "IP 规则", value: "\(model.ruleCounts.ips) 条")
                     InfoRow(title: "域名规则", value: "\(model.ruleCounts.domains) 条")
                     InfoRow(title: "端口规则", value: "\(model.rulePorts) 条")
+                    InfoRow(title: "拦截模式", value: model.interceptMode.title)
+
+                    /* #PORT 段以前只解析不生效。新 beta 规则里这一带有 2650 个端口，
+                       其中含 53/80/443 —— 直接全网封会当场断网，所以做成开关，
+                       默认关；打开后核心端口（AppConfig.corePorts）照样放行。 */
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("端口段拦截")
+                                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                                    .foregroundColor(HK.text)
+                                Text("按规则包 #PORT 段拦端口，核心端口始终放行")
+                                    .font(.system(size: 9.5, weight: .regular, design: .rounded))
+                                    .foregroundColor(HK.textFaint)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 4)
+                            Toggle("", isOn: Binding(
+                                get: { model.portBlocking },
+                                set: { model.setPortBlocking($0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(SwitchToggleStyle(tint: HK.cyan))
+                        }
+                    }
                     InfoRow(title: "下发版本", value: model.ruleVersionText, mono: true)
                     DividerLine()
                     HStack(spacing: 10) {
@@ -269,8 +294,8 @@ struct SettingsView: View {
                 VStack(spacing: 12) {
                     InfoRow(title: "应用", value: "\(AppConfig.appName) v\(AppConfig.appVersion)")
                     InfoRow(title: "版本", value: "v\(AppConfig.appVersion) · build \(AppConfig.buildNumber)")
-                    InfoRow(title: "拦截状态", value: model.diagText)
-                    InfoRow(title: "兼容", value: "iOS 15.0 – iOS 27（含 26 / 27）")
+                    InfoRow(title: "拦截状态", value: model.diagText, multiline: true)
+                    InfoRow(title: "兼容", value: "iOS 14.0 – iOS 27（含 26 / 27）")
                     InfoRow(title: "内核", value: "Packet Tunnel · 用户态协议栈")
                     DividerLine()
                     if let url = URL(string: AppConfig.channelURL) {
