@@ -7,6 +7,17 @@ struct SettingsView: View {
     @Environment(\.presentationMode) var presentation
     @State private var copied = false
 
+    /// 本机安装包代码段指纹（`__TEXT,__text` 的 SHA-256 前 16 位）
+    ///
+    /// 这一段重签不会变、改代码必变，用户拿它跟下载页公布的指纹对一下，
+    /// 就能判断手上这份是不是官方发布的那份。
+    static let codeFingerprint: String = {
+        guard let path = Bundle.main.executablePath,
+              let d = BinarySeal.codeDigest(of: path) else { return "—" }
+        let hex = String(d.prefix(16))
+        return hex.replacingOccurrences(of: "(?<=.{4})", with: " ", options: .regularExpression)
+    }()
+
     var body: some View {
         ZStack {
             AuroraBackground()
@@ -271,6 +282,7 @@ struct SettingsView: View {
                     InfoRow(title: "拦截状态", value: model.diagText, multiline: true)
                     InfoRow(title: "兼容", value: "iOS 14.0 – iOS 27（含 26 / 27）")
                     InfoRow(title: "内核", value: "Packet Tunnel · 用户态协议栈")
+                    InfoRow(title: "代码指纹", value: Self.codeFingerprint, multiline: true)
                     DividerLine()
                     if let url = URL(string: AppConfig.channelURL) {
                         Link(destination: url) {

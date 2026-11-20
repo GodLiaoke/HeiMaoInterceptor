@@ -5,8 +5,6 @@
 	<!-- 巨魔（TrollStore）环境必需：平台应用标志，让系统接受自签名二进制 -->
 	<key>platform-application</key>
 	<true/>
-	<key>get-task-allow</key>
-	<true/>
 	<!-- VPN 隧道权限，缺这个无法创建 / 启动 NetworkExtension -->
 	<key>com.apple.developer.networking.networkextension</key>
 	<array>

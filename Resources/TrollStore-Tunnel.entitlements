@@ -4,8 +4,6 @@
 <dict>
 	<key>platform-application</key>
 	<true/>
-	<key>get-task-allow</key>
-	<true/>
 	<key>com.apple.developer.networking.networkextension</key>
 	<array>
 		<string>packet-tunnel-provider</string>

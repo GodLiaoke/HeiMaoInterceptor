@@ -309,6 +309,33 @@ jobs:
           # ldid -S 会重写文件、把权限重置成 644；iOS 加载扩展要求可执行位，这里补回来
           chmod 755 "$APPEX/HeiMaoTunnel" "$APP/HeiMaoInterceptor"
 
+          # 1.2.5：发布包不允许带 get-task-allow（调试器可以直接 attach 读内存里的卡密）
+          ENT_FAIL=0
+          for b in "$APP/HeiMaoInterceptor" "$APPEX/HeiMaoTunnel"; do
+            if ldid -e "$b" 2>/dev/null | grep -q "get-task-allow"; then
+              echo "ENT_FAIL: $(basename "$b") 仍带 get-task-allow"
+              ENT_FAIL=1
+            fi
+          done
+          [ "$ENT_FAIL" = "0" ] && echo "ENT_OK: 发布包不含 get-task-allow"
+          [ "$ENT_FAIL" = "0" ] || exit 1
+
+          # ATS 必须是关掉全开、且不含明文放行
+          PLIST="$APP/Info.plist"
+          ALLOW=$(/usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSAllowsArbitraryLoads" "$PLIST" 2>/dev/null || echo missing)
+          echo "ATS NSAllowsArbitraryLoads=$ALLOW"
+          if [ "$ALLOW" != "false" ]; then
+            echo "ERROR: ATS 全开明文放行未关闭"
+            exit 1
+          fi
+          INSEC=$(/usr/libexec/PlistBuddy -c "Print :NSAppTransportSecurity:NSExceptionDomains:ios.ouovo.cc:NSExceptionAllowsInsecureHTTPLoads" "$PLIST" 2>/dev/null || echo none)
+          if [ "$INSEC" = "true" ]; then
+            echo "ERROR: 自有域名仍允许明文 HTTP"
+            exit 1
+          fi
+          echo "ATS_OK: 全站 HTTPS，无明文放行"
+
+
           # 重新打包（已签名版）
           cd "$RUNNER_TEMP"
           rm -f HeiMaoInterceptor-TrollStore.ipa

@@ -89,6 +89,15 @@ final class ConfigStore {
         RuleService.shared.clear()
     }
 
+    /// 被调试 / 被注入时用：不经过 save() 的「本地可信」判断，直接把落盘授权抹掉。
+    /// 目的只有一个 —— 让别人从内存或磁盘上都拿不到能直接复用的授权数据。
+    func purgeLocalLicense() {
+        lock.lock()
+        _license = LicenseState.empty(pin: ConfigStore.makePin())
+        lock.unlock()
+        defaults.removeObject(forKey: licenseKey)
+    }
+
     var isAuthorized: Bool { license.isUsable() }
 
     /// 卡密与在线窗口的一次刷新（兑换 / 续期 / 校验 / 查询共用）
@@ -212,11 +221,16 @@ final class ConfigStore {
 
 /// 本地授权数据的封条
 ///
-/// 用主密钥 + 设备码派生 HMAC，覆盖整段 JSON；改一个字节就验不过。
-/// 目的不是加密（内容本来也不敏感），是让「手改 UserDefaults 变成已授权」这条路走不通。
+/// 1.2.5 起：先 AES-256-GCM 加密，再带一段 HMAC 指纹。
+/// 以前只签名不加密，手里拿到 plist 用文本编辑器就能读出卡密原文 ——
+/// 越狱设备、iTunes 备份、任何备份提取工具都能直接拿走。
+/// 现在落到盘上的是密文：内容读不出，改一个字节也验不过。
+///
+/// 老版本（HML1，只签名）仍能读，读出来立刻按新格式重写，用户无感。
 private enum LicenseSeal {
 
-    private static let magic = Data([0x48, 0x4D, 0x4C, 0x31])   // HML1
+    private static let magicV1 = Data([0x48, 0x4D, 0x4C, 0x31])   // HML1 旧格式
+    private static let magicV2 = Data([0x48, 0x4D, 0x4C, 0x32])   // HML2 加密格式
     private static let tagLength = 32
 
     private static var key: SymmetricKey {
@@ -224,21 +238,48 @@ private enum LicenseSeal {
         return SymmetricKey(data: Data(SHA256.hash(data: Data(material.utf8))))
     }
 
+    /// 加密用的密钥：与封条密钥分开派生，避免一处泄露同时丢两样
+    private static var boxKey: SymmetricKey {
+        let material = AppConfig.secureMasterKey + "|" + ConfigStore.makePin() + "|hm-box-v2"
+        return SymmetricKey(data: Data(SHA256.hash(data: Data(material.utf8))))
+    }
+
     static func isSealed(_ blob: Data) -> Bool {
-        blob.count > magic.count + tagLength && blob.prefix(magic.count) == magic
+        guard blob.count > 8 else { return false }
+        let head = blob.prefix(4)
+        return head == magicV1 || head == magicV2
     }
 
     static func seal(_ body: Data) -> Data {
+        if let box = try? AES.GCM.seal(body, using: boxKey), let combined = box.combined {
+            let tag = Data(HMAC<SHA256>.authenticationCode(for: combined, using: key))
+            return magicV2 + combined + tag
+        }
+        /* 理论上走不到这里；真出问题也不丢用户授权，退回旧的签名格式 */
         let tag = Data(HMAC<SHA256>.authenticationCode(for: body, using: key))
-        return magic + body + tag
+        return magicV1 + body + tag
     }
 
     static func open(_ blob: Data) -> Data? {
         guard isSealed(blob) else { return nil }
-        let body = blob.subdata(in: magic.count..<(blob.count - tagLength))
-        let tag = blob.suffix(tagLength)
+        if blob.prefix(4) == magicV2 {
+            let core = blob.dropFirst(4)
+            guard core.count > tagLength else { return nil }
+            let combined = Data(core.dropLast(tagLength))
+            let tag = Data(core.suffix(tagLength))
+            let expect = Data(HMAC<SHA256>.authenticationCode(for: combined, using: key))
+            guard expect == tag else { return nil }
+            guard let box = try? AES.GCM.SealedBox(combined: combined),
+                  let plain = try? AES.GCM.open(box, using: boxKey) else { return nil }
+            return plain
+        }
+        /* 旧格式：验签通过就当合法，调用方会立刻按新格式重写 */
+        let core = blob.dropFirst(4)
+        guard core.count > tagLength else { return nil }
+        let body = Data(core.dropLast(tagLength))
+        let tag = Data(core.suffix(tagLength))
         let expect = Data(HMAC<SHA256>.authenticationCode(for: body, using: key))
-        guard expect == Data(tag) else { return nil }
+        guard expect == tag else { return nil }
         return body
     }
 }

@@ -46,8 +46,22 @@
 	<false/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<!-- 1.2.5：不再全开明文。所有业务请求都走 https，
+		     只给自有域名留一条 TLS 1.2 起的例外（不含任何明文放行） -->
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>
+		<false/>
+		<key>NSExceptionDomains</key>
+		<dict>
+			<key>ios.ouovo.cc</key>
+			<dict>
+				<key>NSExceptionAllowsInsecureHTTPLoads</key>
+				<false/>
+				<key>NSIncludesSubdomains</key>
+				<true/>
+				<key>NSExceptionMinimumTLSVersion</key>
+				<string>TLSv1.2</string>
+			</dict>
+		</dict>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>用于本地网络诊断与加速通道连通性检测</string>

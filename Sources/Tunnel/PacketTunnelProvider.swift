@@ -60,6 +60,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         /* CRC 链第 3 环：隧道进程独立校验一次，链断只上报（不影响防护） */
         _ = Integrity.shared.arm(3)
 
+        /* 1.2.5：扩展进程同样拒绝调试器附加，被挂上就不启动隧道 */
+        Hardening.install()
+        if Hardening.traced {
+            completionHandler(TunnelError.missingConfiguration)
+            return
+        }
+
         guard let conf = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration else {
             completionHandler(TunnelError.missingConfiguration)
             return
