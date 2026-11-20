@@ -770,7 +770,7 @@ table.tbl .empty{text-align:center;color:var(--ink-4);padding:34px 12px;font-siz
                 <div class="label">独立心跳</div>
                 <div style="font-size:12px;color:#4b5563;line-height:1.7">
                   路径 <span class="mono">/api/app/pulse</span> · 25 秒一次 · 走 v4 加密通道<br>
-                  连续 6 次拿不到结果（约 150 秒）客户端按熔断处理。
+                  连续 12 次拿不到结果（约 5 分钟）客户端按熔断处理；从没连通过的新装设备不会因此退出。
                 </div>
                 <button class="btn btn-sm" id="min_save" style="margin-top:10px">保存</button>
               </div>

@@ -298,6 +298,7 @@ final class RuleService {
         case "card_format":    return "卡密格式不对"
         case "no_rules":       return "云端暂无可用规则"
         case "update_required": return "当前版本已停止支持，请更新到最新版本"
+        case "force_update":   return "当前版本已停止下发规则，请更新到最新版本"
         case "rate_limited":   return "请求太频繁，稍后再试"
         case "bad_pin":        return "设备码异常，请重装应用"
         case "":               return "规则下载失败，请重试"

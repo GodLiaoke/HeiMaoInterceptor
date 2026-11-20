@@ -132,7 +132,14 @@ final class PulseService {
         let seenOK = everOK
         let limit = AppConfig.pulseMaxFails
         if !seenOK && elapsed < AppConfig.pulseGrace {
-            /* 冷启动宽限：还没到 90 秒就不计数 */
+            /* 冷启动宽限：这段时间内还没连上过不计数 */
+            lock.unlock()
+            return
+        }
+        /* 从没连通过、本地也没有熔断钉子：说明可能是「刚装就没网」的正常用户，
+           不能因为没网就把人崩掉。改过包的人拿不到规则也等于不能用，
+           这里不误杀，防护强度由「连通过之后再断」这条路保证。 */
+        if !seenOK && !OpsService.pendingFuse {
             lock.unlock()
             return
         }
