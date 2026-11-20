@@ -5,7 +5,11 @@ import CryptoKit
 ///
 /// 为什么不用整文件哈希：巨魔 / ESign / 爱思 重签会改写 `__LINKEDIT`（签名段），
 /// 整个文件的 SHA-256 每次都不同，拿它做校验只会把所有正常用户判死。
-/// `__TEXT` 段是代码本体，重签不动它 —— 这才是"这个包是不是被改过"的正确判据。
+///
+/// 为什么连 `__TEXT` 整段也不行：重签要往 Mach-O header 里加/替换
+/// `LC_CODE_SIGNATURE`，header 就在 `__TEXT` 段开头，ncmds 一改整段哈希就变。
+/// 实测同一个包的签名版与未签名版，`__TEXT,__text`（真正的指令区）哈希完全一致，
+/// 所以校验锚点放在这个 section 上 —— 改代码必然对不上，重签不影响。
 ///
 /// 只读文件、不做任何写操作；解析失败一律返回 nil，调用方按"环境异常"处理。
 enum BinarySeal {
@@ -72,6 +76,70 @@ enum BinarySeal {
         defer { try? fh.close() }
         try? fh.seek(toOffset: s.offset)
 
+        var hasher = SHA256()
+        var left = s.size
+        while left > 0 {
+            let want = Int(min(left, 256 * 1024))
+            guard let chunk = try? fh.read(upToCount: want), !chunk.isEmpty else { return nil }
+            hasher.update(data: chunk)
+            left -= UInt64(chunk.count)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 取指定段里某个 section 的范围（__TEXT,__text 就是指令区）
+    static func sectionSlice(of path: String, seg want: String, sect wantSect: String) -> Slice? {
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? fh.close() }
+        let head = fh.readData(ofLength: 32)
+        guard head.count == 32, head.leUInt32(0) == 0xFEEDFACF else { return nil }
+        let ncmds = Int(head.leUInt32(16))
+        let sizeofcmds = Int(head.leUInt32(20))
+        guard ncmds > 0, ncmds < 4096, sizeofcmds > 0, sizeofcmds < 4 * 1024 * 1024 else { return nil }
+        try? fh.seek(toOffset: 32)
+        guard let body = try? fh.read(upToCount: sizeofcmds) else { return nil }
+
+        var p = 0
+        var i = 0
+        while i < ncmds, p + 8 <= body.count {
+            let cmd = body.leUInt32(p)
+            let cmdsize = Int(body.leUInt32(p + 4))
+            if cmdsize < 8 || p + cmdsize > body.count { break }
+            if cmd == 0x19, cmdsize >= 72 {
+                let segName = String(data: body.subdata(in: (p + 8)..<(p + 24)), encoding: .utf8)?
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? ""
+                let nsects = Int(body.leUInt32(p + 64))
+                var q = p + 72
+                var k = 0
+                while k < nsects, q + 80 <= body.count, q + 80 <= p + cmdsize {
+                    let sName = String(data: body.subdata(in: q..<(q + 16)), encoding: .utf8)?
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? ""
+                    if segName == want, sName == wantSect {
+                        let off = UInt64(body.leUInt32(q + 48))
+                        let size = body.leUInt64(q + 40)
+                        if size > 0 { return Slice(offset: off, size: size) }
+                    }
+                    q += 80
+                    k += 1
+                }
+            }
+            p += cmdsize
+            i += 1
+        }
+        return nil
+    }
+
+    /// `__TEXT,__text` 的 SHA-256 —— 重签不变，改代码必变
+    static func codeDigest(of path: String) -> String? {
+        digest(path: path, slice: sectionSlice(of: path, seg: "__TEXT", sect: "__text"))
+    }
+
+    /// 通用：对一段文件区间做 SHA-256
+    static func digest(path: String, slice: Slice?) -> String? {
+        guard let s = slice, s.size <= 64 * 1024 * 1024 else { return nil }
+        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? fh.close() }
+        try? fh.seek(toOffset: s.offset)
         var hasher = SHA256()
         var left = s.size
         while left > 0 {

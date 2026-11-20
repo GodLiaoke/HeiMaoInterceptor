@@ -184,7 +184,7 @@ public final class HMGuard {
     }
 
     /// 与主程序 GuardLink 里的算法保持一致（消息格式必须逐字相同）
-    static func signForCheck(_ challenge: UInt32, sealTail: String) -> String {
+    static func signForCheck(_ challenge: UInt32) -> String {
         HMGuard.shared.signInternal(challenge)
     }
 
@@ -197,32 +197,19 @@ public final class HMGuard {
         if expected.allSatisfy({ $0 == "0" }) { return true }
         guard expected.count == 64 else { return false }
         guard let path = Bundle.main.executablePath else { return false }
-        guard let actual = Self.textDigest(of: path) else { return false }
+        guard let actual = Self.codeDigest(of: path) else { return false }
         return actual == expected
     }
 
-    private static func textDigest(of path: String) -> String? {
-        guard let slice = textSlice(of: path), slice.size <= 64 * 1024 * 1024 else { return nil }
-        guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
-        defer { try? fh.close() }
-        try? fh.seek(toOffset: slice.offset)
-        var hasher = SHA256()
-        var left = slice.size
-        while left > 0 {
-            let want = Int(min(left, 256 * 1024))
-            guard let chunk = try? fh.read(upToCount: want), !chunk.isEmpty else { return nil }
-            hasher.update(data: chunk)
-            left -= UInt64(chunk.count)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func textSlice(of path: String) -> (offset: UInt64, size: UInt64)? {
+    /// 只哈希 `__TEXT,__text`（指令区）
+    ///
+    /// 为什么不哈希整个 __TEXT：重签要改 Mach-O header 里的 load commands，
+    /// 而 header 就在 __TEXT 段开头。实测签名前后 __text 哈希一致、整段哈希会变。
+    private static func codeDigest(of path: String) -> String? {
         guard let fh = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? fh.close() }
         let head = fh.readData(ofLength: 32)
-        guard head.count == 32 else { return nil }
-        guard head.u32(0) == 0xFEEDFACF else { return nil }
+        guard head.count == 32, head.u32(0) == 0xFEEDFACF else { return nil }
         let ncmds = Int(head.u32(16))
         let sizeofcmds = Int(head.u32(20))
         guard ncmds > 0, ncmds < 4096, sizeofcmds > 0, sizeofcmds < 4 * 1024 * 1024 else { return nil }
@@ -236,13 +223,33 @@ public final class HMGuard {
             let cmdsize = Int(body.u32(p + 4))
             if cmdsize < 8 || p + cmdsize > body.count { break }
             if cmd == 0x19, cmdsize >= 72 {
-                let nameBytes = body.subdata(in: (p + 8)..<(p + 24))
-                let name = String(data: nameBytes, encoding: .utf8)?
+                let segName = String(data: body.subdata(in: (p + 8)..<(p + 24)), encoding: .utf8)?
                     .trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? ""
-                if name == "__TEXT" {
-                    let fileoff = body.u64(p + 40)
-                    let filesize = body.u64(p + 48)
-                    if filesize > 0 { return (fileoff, filesize) }
+                let nsects = Int(body.u32(p + 64))
+                var q = p + 72
+                var k = 0
+                while k < nsects, q + 80 <= body.count, q + 80 <= p + cmdsize {
+                    let sName = String(data: body.subdata(in: q..<(q + 16)), encoding: .utf8)?
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? ""
+                    if segName == "__TEXT", sName == "__text" {
+                        let off = UInt64(body.u32(q + 48))
+                        let size = body.u64(q + 40)
+                        if size > 0, size <= 64 * 1024 * 1024 {
+                            try? fh.seek(toOffset: off)
+                            var hasher = SHA256()
+                            var left = size
+                            while left > 0 {
+                                let want = Int(min(left, 256 * 1024))
+                                guard let chunk = try? fh.read(upToCount: want), !chunk.isEmpty else { return nil }
+                                hasher.update(data: chunk)
+                                left -= UInt64(chunk.count)
+                            }
+                            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+                        }
+                        return nil
+                    }
+                    q += 80
+                    k += 1
                 }
             }
             p += cmdsize

@@ -5,7 +5,11 @@
 两个占位符必须等长替换，否则会破坏 Mach-O 结构：
 
   主程序里的  HMKITSZ:00000000       -> HMKITSZ:<HMKit __TEXT 字节数>
-  看门狗里的  HMTEXTAPP:000...0(64)  -> HMTEXTAPP:<主程序 __TEXT 段的 SHA-256>
+  看门狗里的  HMTEXTAPP:000...0(64)  -> HMTEXTAPP:<主程序 __TEXT,__text 的 SHA-256>
+
+为什么是 __text 而不是整个 __TEXT：重签要改 Mach-O header 里的 load commands，
+header 就在 __TEXT 段开头，ncmds 一变整段哈希就变（实测签名前后差一整段）。
+__text 是真正的指令区，重签不动它 —— 改代码必变，重签不变。
 
 顺序不能反：
   1. 先写主程序里的框架大小（这一步会改主程序 __TEXT 的内容）
@@ -52,8 +56,43 @@ def text_slice(path):
     return None
 
 
+def section_slice(path, want_seg, want_sect):
+    with open(path, "rb") as f:
+        head = f.read(32)
+        if len(head) < 32:
+            return None
+        magic, = struct.unpack_from("<I", head, 0)
+        if magic != 0xFEEDFACF:
+            return None
+        ncmds, sizeofcmds = struct.unpack_from("<II", head, 16)
+        f.seek(32)
+        body = f.read(sizeofcmds)
+    p = 0
+    for _ in range(ncmds):
+        if p + 8 > len(body):
+            break
+        cmd, cmdsize = struct.unpack_from("<II", body, p)
+        if cmdsize < 8 or p + cmdsize > len(body):
+            break
+        if cmd == 0x19 and cmdsize >= 72:
+            seg = body[p + 8:p + 24].rstrip(b"\0").decode("utf-8", "replace")
+            nsects = struct.unpack_from("<I", body, p + 64)[0]
+            q = p + 72
+            for _ in range(nsects):
+                if q + 80 > len(body) or q + 80 > p + cmdsize:
+                    break
+                sect = body[q:q + 16].rstrip(b"\0").decode("utf-8", "replace")
+                if seg == want_seg and sect == want_sect:
+                    size = struct.unpack_from("<Q", body, q + 40)[0]
+                    off = struct.unpack_from("<I", body, q + 48)[0]
+                    return off, size
+                q += 80
+        p += cmdsize
+    return None
+
+
 def text_sha256(path):
-    sl = text_slice(path)
+    sl = section_slice(path, "__TEXT", "__text")
     if not sl:
         return None
     off, size = sl
@@ -99,14 +138,14 @@ def main():
             raise SystemExit("SEAL_FAIL: 读不到 __TEXT 段 %s" % p)
         print("TEXT: %s off=%d size=%d" % (p.split("/")[-1], sl[0], sl[1]))
 
-    kit_size = text_slice(kit_bin)[1]
+    kit_size = text_slice(kit_bin)[1]  # 框架 __TEXT 段大小（重签不改段大小）
     # 1) 框架大小写进主程序（等长 8 位十进制）
     patch(main_bin, "HMKITSZ:", 8, str(kit_size).zfill(8))  # 等长：不足 8 位补零
 
     # 2) 主程序定稿后算哈希
     digest = text_sha256(main_bin)
     if not digest or len(digest) != 64:
-        raise SystemExit("SEAL_FAIL: 主程序 __TEXT 哈希算不出来")
+        raise SystemExit("SEAL_FAIL: 主程序 __text 哈希算不出来")
     print("APP_TEXT_SHA256: %s" % digest)
 
     # 3) 哈希写进看门狗

@@ -17,7 +17,7 @@ def main():
 
     digest = sb.text_sha256(app_bin)
     if not digest:
-        print("SEAL_VERIFY: FAIL 读不到主程序 __TEXT")
+        print("SEAL_VERIFY: FAIL 读不到主程序 __text")
         return 1
 
     with open(kit_bin, "rb") as f:
