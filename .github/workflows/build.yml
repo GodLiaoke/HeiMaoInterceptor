@@ -109,13 +109,33 @@ jobs:
           # 大体积 dylib 留在包里，第三方重签工具（ESign / 爱思）会直接报签名失败。
           BINS="$APP/HeiMaoInterceptor $APP/PlugIns/HeiMaoTunnel.appex/HeiMaoTunnel $APP/Frameworks/HMKit.framework/HMKit"
           if [ -d "$APP/Frameworks" ]; then
+            # 先把每个二进制的依赖列出来，方便下回排查
+            for b in $BINS; do
+              [ -f "$b" ] || continue
+              echo "DEPS $(basename "$b"):"
+              otool -L "$b" 2>/dev/null | awk 'NR>1{print "  "$1}' || true
+            done
+
+            # 1) Swift 并发兼容库：这几个二进制都没用 async/await，直接去掉
+            if [ -e "$APP/Frameworks/libswift_Concurrency.dylib" ]; then
+              for b in $BINS; do
+                [ -f "$b" ] || continue
+                if otool -L "$b" 2>/dev/null | awk 'NR>1{print $1}' | grep -qxF "@rpath/libswift_Concurrency.dylib"; then
+                  echo "REF_WARN: $b 依赖 libswift_Concurrency"
+                fi
+              done
+              rm -f "$APP/Frameworks/libswift_Concurrency.dylib"
+              echo "PRUNE: 删除 libswift_Concurrency.dylib"
+            fi
+
+            # 2) 其它 dylib：没有任何二进制依赖就删掉（精确匹配，别拿子串判断）
             for fw in "$APP"/Frameworks/*.dylib; do
               [ -e "$fw" ] || continue
               name=$(basename "$fw")
               used=0
               for b in $BINS; do
                 [ -f "$b" ] || continue
-                if otool -L "$b" 2>/dev/null | grep -q "$name"; then used=1; fi
+                if otool -L "$b" 2>/dev/null | awk 'NR>1{print $1}' | grep -qxF "@rpath/$name"; then used=1; fi
               done
               if [ "$used" = "0" ]; then
                 echo "PRUNE: 删除未引用的 $name"

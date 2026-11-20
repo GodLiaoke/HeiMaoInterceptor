@@ -2,7 +2,25 @@
 
 ## 当前版本
 
-**v1.2.3 build 121**（2026-11-21 · iOS14 弹窗修复 / 全局或规则二选一 / 维护与熔断 / 看门狗）
+**v1.2.3 build 122**（2026-11-21 · iOS14 弹窗修复 / 全局或规则二选一 / 维护与熔断 / 看门狗 / 去掉无用 Swift 兼容库修重签）
+
+### build 122：修「ipa 没法签名」
+
+现象：1.2.3 build 121 的包，ESign / 爱思重签直接失败；1.2.2 及以前都正常。
+
+根因：1.2.3 新增了动态框架 HMKit，Xcode 顺带给 iOS 14 目标的动态框架塞了
+`Frameworks/libswift_Concurrency.dylib`（7.7MB）。用 otool 逐二进制核对：
+主程序 / 隧道扩展 / HMKit **都没有链接它**（全是 DispatchQueue，没有 async-await），
+纯属白带的死重量。这类苹果自签的大体积 dylib 留在第三方包里，重签工具会直接报错，
+包体积也从 1.28MB 涨到 3.88MB。
+
+修复（build.yml 打包阶段）：
+- 打包时遍历 `Frameworks/*.dylib`，用 `otool -L` 查主程序 / 扩展 / HMKit 是否引用；
+  没引用就删掉，并打印 `PRUNE:` / `KEEP:` 日志
+- 加硬校验：若 `libswift_Concurrency.dylib` 仍在包里 → `PRUNE_FAIL` 中断构建
+- 结果：包回到 ~1.3MB 量级，结构跟 1.2.2 一致（只多一个我们自己签过的 HMKit）
+
+版本号：1.2.3 / build 122（build 号必须大于 121，否则已装 121 的用户收不到更新）。
 
 ### 1.2.3 改动
 
