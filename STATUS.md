@@ -23,8 +23,30 @@
 
 ### 发布
 
-- 版本表待发布：1.2.6 / build 125（流水线出包后由后台「规则与版本 → 发布」写入）
 - 变更文件：`Sources/App/Views/CardCodeField.swift`（新增）、`Sources/App/Views/SettingsView.swift`、`Sources/App/Views/GlassKit.swift`、`Sources/Shared/AppConfig.swift`、`project.yml`
+
+### 上线记录（2026-11-21 14:47 北京时间）
+
+- 流水线：commit `682b0b4` → run `44876312716`（macos-15 runner），`SIGN_PHASE_OK` / `ENT_OK` / `OBF_OK` / `SYMBOL_OK`
+- 包：
+
+| 文件 | 大小 | SHA-256 |
+|---|---|---|
+| HeiMao_Pro_v1.2.6_build125_signed.ipa | 1,392,990 B | 0b04691fccdedf179ce08db901d898443da246ad6d69a607f93afae60df52c22 |
+| HeiMao_Pro_v1.2.6_build125_unsigned.ipa | 1,370,233 B | 64d876fb626a37fcbe31c32f8aad04a96b6ff559b23eeaa1ae9d7d144424fa49 |
+
+- 代码段指纹 `b36c505b9e9344b4…`（签名包与未签名包完全一致，重签不会触发看门狗误判）
+- 双端 1.2.6 / 125，MinimumOSVersion 14.0，三端 755，Frameworks 只留 HMKit（无 libswift_Concurrency）
+- entitlements 无 `get-task-allow`；ATS 全站 HTTPS
+- 线上版本表 id=13 → 1.2.6 / 125（force_update=1，min_version=1.2.6）；下载页自动显示 1.2.6（125）、哈希与指纹，`/dl/*` 两个包实测 200、大小与源文件一致
+- `/dl/manifest.json` 已更新（version 1.2.6 / build 125 / code_hash）；1.2.4 已移入 `archive_old/`，`/dl/` 只留 1.2.5 与 1.2.6
+- 备份：`storage/sqlite/app.db.bak_125_*`、`archive_old/manifest.json.bak_1.2.5_124`
+
+### 待真机验证
+
+- 装 1.2.6 后「设置 → 关于 → 代码指纹」应显示 `b36c 505b 9e93 44b4`
+- iOS 14 真机：点卡密输入框能起键盘、光标能落、粘贴按钮可用；iOS 15+ 回归一遍
+- 后台公告：发一条 500+ 字公告，刷新页面与客户端都应立即显示新内容
 
 ---
 
