@@ -45,6 +45,8 @@ struct LicenseState: Codable {
     var verdict: LicenseVerdict     // 服务端判定结果
     var verifiedAt: Date?           // 上次拿到服务端明确结论的时间
     var tier: String                // 卡密版本：free / beta / pro / max
+    /// 1.2.8：永久卡。true 时不看 expireAt（服务端会同时给一个远期时间做兜底）
+    var permanent: Bool
     var banReason: String?          // 被封禁的原因（后台填写，客户端展示）
     var kicked: Bool                // 是否被管理员强制下线
     var kickReason: String?         // 下线原因
@@ -52,14 +54,15 @@ struct LicenseState: Codable {
     enum CodingKeys: String, CodingKey {
         case pin, code, authorized, expireAt, sessionUntil, lastCheck,
              configKid, configExpire, note, verdict, verifiedAt,
-             tier, banReason, kicked, kickReason
+             tier, banReason, kicked, kickReason, permanent
     }
 
     init(pin: String, code: String, authorized: Bool, expireAt: Date?, sessionUntil: Date?,
          lastCheck: Date, configKid: String?, configExpire: Date?, note: String?,
          verdict: LicenseVerdict = .unknown, verifiedAt: Date? = nil,
          tier: String = "pro", banReason: String? = nil,
-         kicked: Bool = false, kickReason: String? = nil) {
+         kicked: Bool = false, kickReason: String? = nil,
+         permanent: Bool = false) {
         self.pin = pin
         self.code = code
         self.authorized = authorized
@@ -75,6 +78,7 @@ struct LicenseState: Codable {
         self.banReason = banReason
         self.kicked = kicked
         self.kickReason = kickReason
+        self.permanent = permanent
     }
 
     /// 老版本数据兼容：缺 verdict 一律当 unknown（下次启动会被强制校验）
@@ -95,6 +99,7 @@ struct LicenseState: Codable {
         banReason = try? c.decodeIfPresent(String.self, forKey: .banReason)
         kicked = (try? c.decode(Bool.self, forKey: .kicked)) ?? false
         kickReason = try? c.decodeIfPresent(String.self, forKey: .kickReason)
+        permanent = (try? c.decodeIfPresent(Bool.self, forKey: .permanent)) ?? false
     }
 
     static func empty(pin: String) -> LicenseState {
@@ -110,7 +115,7 @@ struct LicenseState: Codable {
     /// - 断网（window_expired / unknown）→ 窗口 + 宽限内仍可用
     func isUsable(now: Date = Date()) -> Bool {
         guard !code.isEmpty else { return false }
-        if let exp = expireAt, exp <= now { return false }
+        if !permanent, let exp = expireAt, exp <= now { return false }
 
         switch verdict {
         case .ok:
@@ -138,7 +143,7 @@ struct LicenseState: Codable {
     /// 就把正在跑的防护掐了。现在分开：这里 true 才停，其余只提示、等下一次校验。
     var isHardInvalid: Bool {
         if code.isEmpty { return true }
-        if let exp = expireAt, exp <= Date() { return true }
+        if !permanent, let exp = expireAt, exp <= Date() { return true }
         return verdict.isHardFailure
     }
 
@@ -185,6 +190,7 @@ struct LicenseState: Codable {
     }
 
     var expireText: String {
+        if permanent { return "永久有效" }
         guard let exp = expireAt else { return "—" }
         let f = DateFormatter()
         f.locale = Locale(identifier: "zh_CN")
@@ -194,6 +200,7 @@ struct LicenseState: Codable {
 
     /// 剩余时间（按天/小时）
     var remainText: String {
+        if permanent { return "永久" }
         guard let exp = expireAt else { return "—" }
         let s = Int(exp.timeIntervalSinceNow)
         if s <= 0 { return "已到期" }

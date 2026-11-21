@@ -112,6 +112,8 @@ final class ConfigStore {
         merged.code = code.isEmpty ? old.code : code
         if merged.expireAt == nil && merged.code == old.code {
             merged.expireAt = old.expireAt
+            /* 1.2.8：服务端这次没带 permanent（老接口/异常响应）时别把永久卡降级 */
+            if old.permanent { merged.permanent = true }
         }
         /* 服务端明确判死时，本地校验窗口一并作废，防止界面残留旧窗口误导 */
         if merged.verdict.isHardFailure {

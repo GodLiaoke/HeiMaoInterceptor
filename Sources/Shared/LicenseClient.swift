@@ -148,6 +148,11 @@ final class LicenseClient {
         if let t = obj["tier"] as? String, !t.isEmpty {
             st.tier = t.lowercased()
         }
+        /* 1.2.8：永久卡。服务端同时会给一个远期 card_expire_at 做兜底，
+           这里拿 permanent 让界面直接显示「永久」，不去算那个两万多天。 */
+        if let p = obj["permanent"] as? Bool {
+            st.permanent = p
+        }
         if let br = obj["ban_reason"] as? String, !br.isEmpty {
             st.banReason = br
         }

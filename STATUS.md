@@ -2,6 +2,37 @@
 
 ## 当前版本
 
+**v1.2.8 build 127**（2026-11-21 · 修 iOS 14 进设置闪退 + 卡密永久卡）
+
+### 客户端
+
+| 问题 | 处置 |
+|---|---|
+| iOS 14 进设置 / 激活卡密页闪退 | **根因**：1.2.7 的「端口段拦截」用了 `SwitchToggleStyle(tint:)`，这个初始化器 iOS 15.0 起才有。对比两版包的动态符号，1.2.7 新增了 `SwiftUI.SwitchToggleStyle.init(tint:)`，1.2.6 没有 —— iOS 14 渲染规则库卡片时懒绑定找不到符号，当场崩。 |
+| 处置 | 改成自绘开关 `HMInlineSwitch`（Capsule + Circle + offset，全是 iOS 13 API），不再引用 Toggle / SwitchToggleStyle / `Binding(get:set:)` |
+| 设置页自动聚焦 | 去掉 `ScrollViewReader` + `scrollTo`（iOS 14 在 sheet 转场里会拿到已释放的滚动容器）；只保留一次 `focus()`，且 `CardCodeFocus.focus()` 先确认字段已进 window |
+| 永久卡支持 | `LicenseState` 新增 `permanent`；`expireText` 显示「永久有效」、`remainText` 显示「永久」；`isUsable` / `isHardInvalid` 对永久卡不看 `expireAt`；本地合并时不会把永久标记降级 |
+| 版本 | 1.2.8 / 127 |
+
+### 服务端
+
+| 项 | 处置 |
+|---|---|
+| 永久卡生成 | 后台「生成卡密 → 卡密类型」新增「永久卡 · 永久有效」；`cards.duration_sec = 0` 表示永久，兑换后 `expire_at` 写 `PERMANENT_UNTIL = 4102444800`（2100-01-01） |
+| 接口 | `card/redeem`、`session/state`、`session/beat`、`payload` 都带 `permanent`；老客户端拿到远期 `card_expire_at` 照常能用 |
+| 时长上限 | 顺手修了个老 bug：`createBatch` 以前把时长卡在 30 天，季卡/年卡生成出来只有 30 天；现在上限 3650 天 |
+| 后台展示 | `dur()` 对 0 显示「永久」；延期按钮对永久卡不再改动 |
+| 实测 | 生成 1 张永久卡 → 兑换 → `expire_at=4102444800`、`permanent=true`；30 天卡 2592000、365 天卡 31536000（不再被截）；测试数据已清理 |
+| 备份 | `~/bak-1.2.8-20261121-234720/`（4 个文件原样） |
+
+### 待真机验证
+
+- iOS 14：设置页能正常打开、不再闪退；点卡密框能起键盘、能粘
+- iOS 14：永久卡激活后「剩余」显示「永久」、不显示两万多天
+- 端口段拦截开关（默认关）打开后自动重连、核心端口仍放行
+
+---
+
 **v1.2.7 build 126**（2026-11-21 · 恢复「端口段拦截」开关：独立于拦截模式，默认关闭）
 
 ### 客户端

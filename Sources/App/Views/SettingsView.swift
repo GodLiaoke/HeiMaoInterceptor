@@ -24,42 +24,33 @@ struct SettingsView: View {
         ZStack {
             AuroraBackground()
 
-            ScrollViewReader { proxy in
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 16) {
-                        header
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 16) {
+                    header
 
-                        announcementCard
-                        licenseCard.id("licenseCard")
-                        deviceCard
-                        rulesCard
-                        aboutCard
+                    announcementCard
+                    licenseCard
+                    deviceCard
+                    rulesCard
+                    aboutCard
 
-                        Text("全网最强 · \(AppConfig.channelName)")
-                            .font(.system(size: 10.5, weight: .regular, design: .rounded))
-                            .foregroundColor(HK.textFaint)
-                            .padding(.top, 6)
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 12)
-                    .padding(.bottom, 40)
+                    Text("全网最强 · \(AppConfig.channelName)")
+                        .font(.system(size: 10.5, weight: .regular, design: .rounded))
+                        .foregroundColor(HK.textFaint)
+                        .padding(.top, 6)
                 }
-                /* 1.2.6：进来还没激活就把键盘直接调起来，顺手把卡密那一格滚到眼前。
-                   万一 iOS 14 上点输入框还是没反应，用户也能立刻开始打字，不用先找原因。
-                   延迟是为了等 sheet 转场走完：太早 becomeFirstResponder 会被系统丢掉。 */
-                .onAppear {
-                    guard model.license.code.isEmpty else { return }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
-                        cardFocus.focus()
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            proxy.scrollTo("licenseCard", anchor: .top)
-                        }
-                    }
-                    /* 再补一次：转场慢的老机器上第一次可能还没进 window */
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                        guard model.license.code.isEmpty else { return }
-                        cardFocus.focus()
-                    }
+                .padding(.horizontal, 18)
+                .padding(.top, 12)
+                .padding(.bottom, 40)
+            }
+            /* 1.2.8：进页面还没激活就把键盘调起来。
+               这里不再用 ScrollViewReader 去 scrollTo —— iOS 14 上它会在 sheet 转场里
+               拿到已经释放的滚动容器，是 1.2.7「点设置就闪退」的元凶之一。
+               定时器只碰输入框自己，且 focus() 里会先确认字段已经在 window 上。 */
+            .onAppear {
+                guard model.license.code.isEmpty else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    cardFocus.focus()
                 }
             }
         }
@@ -286,12 +277,13 @@ struct SettingsView: View {
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             Spacer(minLength: 4)
-                            Toggle("", isOn: Binding(
-                                get: { model.portBlocking },
-                                set: { model.setPortBlocking($0) }
-                            ))
-                            .labelsHidden()
-                            .toggleStyle(SwitchToggleStyle(tint: HK.cyan))
+                            /* 1.2.8：不用系统 Toggle。
+                               SwitchToggleStyle(tint:) 是 iOS 15 才有的初始化器，
+                               iOS 14 上渲染到这一行会直接崩（包里能查到这条动态符号）。
+                               自己画一个，只用 iOS 13 就有的 Shape / offset。 */
+                            HMInlineSwitch(isOn: model.portBlocking) { on in
+                                model.setPortBlocking(on)
+                            }
                         }
                     }
 
@@ -421,5 +413,41 @@ struct FlowChips: View {
         }
         if !current.isEmpty { out.append(current) }
         return out
+    }
+}
+
+/// 极简开关（1.2.8）
+///
+/// 为什么不直接用 `Toggle` + `SwitchToggleStyle(tint:)`：
+/// 那个初始化器是 iOS 15.0 起才有的。项目最低支持 iOS 14，
+/// 1.2.7 在 iOS 14 上一渲染设置页就崩，包里能查到
+/// `SwiftUI.SwitchToggleStyle.init(tint:)` 这条动态符号 —— 系统里根本没有。
+///
+/// 这里只用 Capsule / Circle / offset / withAnimation，全是 iOS 13 就有的东西，
+/// 老系统上不会再出这种「符号不存在」的崩。
+private struct HMInlineSwitch: View {
+    var isOn: Bool
+    var onToggle: (Bool) -> Void
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.16)) {
+                onToggle(!isOn)
+            }
+        } label: {
+            ZStack {
+                Capsule()
+                    .fill(isOn ? HK.cyan.opacity(0.90) : Color.white.opacity(0.14))
+                    .frame(width: 44, height: 26)
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 22, height: 22)
+                    .shadow(color: Color.black.opacity(0.22), radius: 1.5, x: 0, y: 1)
+                    .offset(x: isOn ? 9 : -9)
+            }
+            .frame(width: 44, height: 26)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 }

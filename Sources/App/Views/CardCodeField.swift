@@ -8,7 +8,9 @@ final class CardCodeFocus: ObservableObject {
     weak var field: UITextField?
 
     func focus() {
-        guard let f = field else { return }
+        /* 1.2.8：字段还没进 window（sheet 转场中 / 页面已经关掉）时不要抢第一响应者，
+           iOS 14 上这时 becomeFirstResponder 会被系统丢掉，严重时连带转场一起崩。 */
+        guard let f = field, f.window != nil else { return }
         if !f.isFirstResponder { f.becomeFirstResponder() }
     }
 
