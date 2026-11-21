@@ -261,9 +261,7 @@ struct SettingsView: View {
     /// 规则卡只给「用户需要知道的」：来源、套数、版本、模式。
     ///
     /// 1.2.4：删掉了 IP / 域名 / 端口的分项条数、规则集名字和「端口段拦截」开关。
-    /// 那些是规则包内部结构（#IP / #DOMAIN / #PORT / #DIRECT 段），
-    /// 露在界面上既容易被拿去做指纹，也让人误以为要自己调。
-    /// 端口段现在由模式决定：全局模式开、规则模式关，用户不需要也不该看见这个开关。
+    /// 1.2.7：按站长要求把「端口段拦截」开关加回来，独立于拦截模式，默认关闭。
     private var rulesCard: some View {
         VStack(spacing: 9) {
             SectionHeader(title: "规则库", subtitle: "RULES")
@@ -272,6 +270,31 @@ struct SettingsView: View {
                     InfoRow(title: "来源", value: model.ruleSource)
                     InfoRow(title: "规则集", value: model.ruleSetCount > 0 ? "\(model.ruleSetCount) 套" : "—")
                     InfoRow(title: "拦截模式", value: model.interceptMode.title)
+
+                    /* 1.2.7：端口段开关加回来了，默认关。规则包 #PORT 段有 2650 个端口，
+                       含 53/80/443 —— 默认打开会当场断网，所以默认关；
+                       用户自己打开后，核心端口（AppConfig.corePorts）照样放行。 */
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("端口段拦截")
+                                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
+                                    .foregroundColor(HK.text)
+                                Text("按规则包 #PORT 段拦端口，核心端口始终放行；默认关闭")
+                                    .font(.system(size: 9.5, weight: .regular, design: .rounded))
+                                    .foregroundColor(HK.textFaint)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 4)
+                            Toggle("", isOn: Binding(
+                                get: { model.portBlocking },
+                                set: { model.setPortBlocking($0) }
+                            ))
+                            .labelsHidden()
+                            .toggleStyle(SwitchToggleStyle(tint: HK.cyan))
+                        }
+                    }
+
                     InfoRow(title: "下发版本", value: model.ruleVersionText, mono: true)
 
                     DividerLine()

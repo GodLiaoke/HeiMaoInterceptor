@@ -68,11 +68,11 @@ final class AppModel: ObservableObject {
     @Published var licenseInput: String = ""
     /// 拦截模式：规则 / 全局（1.2.3）
     @Published var interceptMode: InterceptMode = ConfigStore.shared.mode
-    /// 规则包 #PORT 段是否参与拦截（1.2.4）
+    /// 规则包 #PORT 段是否参与拦截（1.2.7）
     ///
-    /// 不再给用户开关：全局模式下自动打开，规则模式下自动关闭。
-    /// 这一项在设置页也不显示 —— 它是实现细节，不该出现在用户面前。
-    var portBlocking: Bool { interceptMode == .global }
+    /// 恢复成用户开关，默认关闭；打开后核心端口仍然放行。
+    /// 设置页「规则库」里的开关直接绑这一项。
+    @Published var portBlocking: Bool = ConfigStore.shared.portBlocking
     /// 维护模式原因（nil = 正常）。服务端开启维护后，整个界面会被维护页盖住
     @Published var maintenanceReason: String?
 
@@ -771,6 +771,23 @@ final class AppModel: ObservableObject {
         tunnel.restart()
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             self?.switching = false
+        }
+    }
+
+    /// #PORT 段开关：同样要重连才生效（1.2.7 恢复给用户）
+    func setPortBlocking(_ on: Bool) {
+        guard portBlocking != on else { return }
+        ConfigStore.shared.portBlocking = on
+        portBlocking = on
+        if tunnel.isConnected {
+            toast = on ? "端口拦截已开启，正在重新应用…" : "端口拦截已关闭，正在重新应用…"
+            switching = true
+            tunnel.restart()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                self?.switching = false
+            }
+        } else {
+            publishResult(on ? "端口拦截已开启（核心端口仍然放行）" : "端口拦截已关闭")
         }
     }
 

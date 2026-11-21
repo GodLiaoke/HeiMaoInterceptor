@@ -17,6 +17,7 @@ final class ConfigStore {
     private let licenseKey = "hm.license.v1"
     private let statsKey   = "hm.stats.v1"
     private let modeKey    = "hm.mode.v1"
+    private let portBlockKey = "hm.portblock.v1"
 
     private let lock = NSRecursiveLock()
     private var _license: LicenseState
@@ -154,12 +155,16 @@ final class ConfigStore {
         set { defaults.set(newValue.rawValue, forKey: modeKey) }
     }
 
-    /// 规则包 #PORT 段是否参与拦截（1.2.4）
+    /// 规则包 #PORT 段是否参与拦截（1.2.7：恢复成独立用户开关，默认关闭）
     ///
-    /// 以前是用户开关，现在跟模式绑定：全局模式打开（本来就要全接管），
-    /// 规则模式关闭（按端口全网封最容易误伤正常上网）。
-    /// 界面上不再出现这一项，老版本留下的偏好值也不再读取。
-    var portBlocking: Bool { mode == .global }
+    /// 1.2.4 曾把它跟模式绑死（全局开、规则关），实际用下来大家要的是自己决定。
+    /// 现在恢复成独立开关：默认关，用户自己打开才按 #PORT 段拦；
+    /// 打开后 [AppConfig.corePorts]（22/53/80/123/443/853/8080/8443）永远放行，
+    /// 不会把授权通道一起封掉。改动要重连隧道才生效。
+    var portBlocking: Bool {
+        get { defaults.bool(forKey: portBlockKey) }
+        set { defaults.set(newValue, forKey: portBlockKey) }
+    }
 
     // MARK: - 隧道参数
 
