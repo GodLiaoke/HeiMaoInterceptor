@@ -59,8 +59,15 @@ struct AuroraBackground: View {
         }
         .ignoresSafeArea()
         .onAppear {
-            withAnimation(.easeInOut(duration: 9).repeatForever(autoreverses: true)) {
-                phase = 1
+            /* 1.2.6：iOS 14 上不要跑无限循环动画。
+               全屏模糊 + repeatForever 会让这一层长期高频重绘，14 上实测会抢触摸、
+               连带输入框拿不到焦点（卡密打不进去）。旧系统给一张静止的背景，观感几乎没差。 */
+            if #available(iOS 15.0, *) {
+                withAnimation(.easeInOut(duration: 9).repeatForever(autoreverses: true)) {
+                    phase = 1
+                }
+            } else {
+                phase = 0.5
             }
         }
     }
@@ -292,8 +299,11 @@ struct PowerOrb: View {
         }
         .frame(width: 250, height: 250)
         .onAppear {
-            withAnimation(.linear(duration: 12).repeatForever(autoreverses: false)) { spin = 360 }
-            withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) { pulse = 1 }
+            /* 同 AuroraBackground：iOS 14 上跑两个 repeatForever 动画同样会抢触摸 */
+            if #available(iOS 15.0, *) {
+                withAnimation(.linear(duration: 12).repeatForever(autoreverses: false)) { spin = 360 }
+                withAnimation(.easeInOut(duration: 2.6).repeatForever(autoreverses: true)) { pulse = 1 }
+            }
         }
     }
 }

@@ -6,6 +6,8 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.presentationMode) var presentation
     @State private var copied = false
+    /// 卡密输入框（UIKit 版）。用来在页面出现后主动拉起键盘
+    @StateObject private var cardFocus = CardCodeFocus()
 
     /// 本机安装包代码段指纹（`__TEXT,__text` 的 SHA-256 前 16 位）
     ///
@@ -22,24 +24,43 @@ struct SettingsView: View {
         ZStack {
             AuroraBackground()
 
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 16) {
-                    header
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 16) {
+                        header
 
-                    announcementCard
-                    licenseCard
-                    deviceCard
-                    rulesCard
-                    aboutCard
+                        announcementCard
+                        licenseCard.id("licenseCard")
+                        deviceCard
+                        rulesCard
+                        aboutCard
 
-                    Text("全网最强 · \(AppConfig.channelName)")
-                        .font(.system(size: 10.5, weight: .regular, design: .rounded))
-                        .foregroundColor(HK.textFaint)
-                        .padding(.top, 6)
+                        Text("全网最强 · \(AppConfig.channelName)")
+                            .font(.system(size: 10.5, weight: .regular, design: .rounded))
+                            .foregroundColor(HK.textFaint)
+                            .padding(.top, 6)
+                    }
+                    .padding(.horizontal, 18)
+                    .padding(.top, 12)
+                    .padding(.bottom, 40)
                 }
-                .padding(.horizontal, 18)
-                .padding(.top, 12)
-                .padding(.bottom, 40)
+                /* 1.2.6：进来还没激活就把键盘直接调起来，顺手把卡密那一格滚到眼前。
+                   万一 iOS 14 上点输入框还是没反应，用户也能立刻开始打字，不用先找原因。
+                   延迟是为了等 sheet 转场走完：太早 becomeFirstResponder 会被系统丢掉。 */
+                .onAppear {
+                    guard model.license.code.isEmpty else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+                        cardFocus.focus()
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo("licenseCard", anchor: .top)
+                        }
+                    }
+                    /* 再补一次：转场慢的老机器上第一次可能还没进 window */
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        guard model.license.code.isEmpty else { return }
+                        cardFocus.focus()
+                    }
+                }
             }
         }
     }
@@ -108,18 +129,34 @@ struct SettingsView: View {
             SectionHeader(title: "卡密授权", subtitle: "LICENSE")
             GlassCard {
                 VStack(alignment: .leading, spacing: 13) {
-                    HStack {
-                        TextField("", text: $model.licenseInput)
-                            .placeholder(when: model.licenseInput.isEmpty) {
-                                Text("输入卡密，如 PQGL-UXW7-YMYF-KC3W")
-                                    .font(.system(size: 13, design: .rounded))
-                                    .foregroundColor(HK.textFaint)
+                    HStack(spacing: 8) {
+                        /* 1.2.6：换成 UIKit 的 UITextField（见 CardCodeField.swift）。
+                           iOS 14 上原来那个 SwiftUI TextField 点击拿不到焦点，键盘不弹，
+                           用户根本打不进卡密。现在原生输入框 + 进页面自动聚焦，
+                           再配一个「粘贴」按钮，连打字都不用。 */
+                        CardCodeField(text: $model.licenseInput,
+                                      placeholder: "输入卡密，如 PQGL-UXW7-YMYF-KC3W",
+                                      focusBox: cardFocus,
+                                      onCommit: { model.activate(code: model.licenseInput) })
+                            .frame(maxWidth: .infinity, minHeight: 22, alignment: .leading)
+
+                        Button {
+                            /* 从剪贴板直接灌进来：iOS 14 上哪怕键盘起不来也能激活 */
+                            if let raw = UIPasteboard.general.string {
+                                let code = CardCodeField.format(raw)
+                                if !code.isEmpty { model.licenseInput = code }
                             }
-                            .font(.system(size: 13, weight: .medium, design: .monospaced))
-                            .foregroundColor(HK.text)
-                            .autocapitalization(.allCharacters)
-                            .disableAutocorrection(true)
-                            .keyboardType(.asciiCapable)
+                            cardFocus.focus()
+                        } label: {
+                            Text("粘贴")
+                                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
+                                .foregroundColor(HK.cyan)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 6)
+                                .background(Capsule().fill(HK.cyan.opacity(0.14)))
+                                .overlay(Capsule().stroke(HK.cyan.opacity(0.35), lineWidth: 0.7))
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 13)
