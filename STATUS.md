@@ -25,6 +25,23 @@
 | 实测 | 生成 1 张永久卡 → 兑换 → `expire_at=4102444800`、`permanent=true`；30 天卡 2592000、365 天卡 31536000（不再被截）；测试数据已清理 |
 | 备份 | `~/bak-1.2.8-20261121-234720/`（4 个文件原样） |
 
+### 上线记录（2026-11-21 23:57 北京时间）
+
+- 流水线：commit `f36cf0f` → run `44921212323`（macos-15 runner），全流程 success
+- 包：
+
+| 文件 | 大小 | SHA-256 |
+|---|---|---|
+| HeiMao_Pro_v1.2.8_build127_signed.ipa | 1,397,203 B | bcc604d958cf9e1eb354e70e735f74c5c5cee044bfb68fdee0631b96a4aa066f |
+| HeiMao_Pro_v1.2.8_build127_unsigned.ipa | 1,374,204 B | e11e21b3d91750fd256833086e0aa0152af14d939ece2bbf5b2a703d130c5f2c |
+
+- 代码段指纹 `c90c90ee0f65694e…`（签名包与未签名包一致）
+- 双端 1.2.8 / 127，MinimumOSVersion 14.0
+- **符号验证**：1.2.7 里的 `SwiftUI.SwitchToggleStyle.init(tint:)`、`toggleStyle`、`Toggle`、`Binding.init(get:set:)`、`ScrollViewReader`/`ScrollViewProxy`、`ScM`（Actor）全部消失；新包相比 1.2.7 只多了 1 条 `KeyedDecodingContainer.decodeIfPresent(Bool)`（读 permanent 用，iOS 14 本来就有）
+- 线上版本表 id=15 → 1.2.8 / 127（force_update=1，min_version=1.2.8）；下载页显示 v1.2.8 / 1.2.8（127）；两个包实测 200，Content-Length 1397203 与源文件一致
+- `/dl/manifest.json` 已更新；1.2.6 移入 `archive_old/`，`/dl/` 只留 1.2.7 与 1.2.8
+- 备份：`storage/sqlite/app.db.bak_127_*`、`archive_old/manifest.json.bak_1.2.7_126`、服务端代码 `~/bak-1.2.8-20261121-234720/`
+
 ### 待真机验证
 
 - iOS 14：设置页能正常打开、不再闪退；点卡密框能起键盘、能粘
