@@ -63,7 +63,6 @@ struct MainView: View {
 
                     licenseCard
                     statsSection
-                    channelCard
                     footer
                 }
                 .padding(.horizontal, 18)
@@ -430,41 +429,6 @@ struct MainView: View {
         }
     }
 
-    // MARK: - 频道
-
-    private var channelCard: some View {
-        GlassCard(padding: 16, corner: 22) {
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle().fill(HK.cyan.opacity(0.16)).frame(width: 38, height: 38)
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(HK.cyan)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("官方频道")
-                        .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                        .foregroundColor(HK.text)
-                    Text(AppConfig.channelName)
-                        .font(.system(size: 11.5, weight: .regular, design: .rounded))
-                        .foregroundColor(HK.textDim)
-                }
-                Spacer()
-                if let url = URL(string: AppConfig.channelURL) {
-                    Link(destination: url) {
-                        Text("前往")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundColor(HK.cyan)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(HK.cyan.opacity(0.14))
-                                            .overlay(Capsule().stroke(HK.cyan.opacity(0.35), lineWidth: 0.7)))
-                    }
-                }
-            }
-        }
-    }
-
     private var footer: some View {
         VStack(spacing: 6) {
             Text("\(AppConfig.appName) · 全网最强 · 不采集任何流量内容")
@@ -721,23 +685,6 @@ struct MaintenanceView: View {
                     .font(.system(size: 10.5, weight: .regular, design: .rounded))
                     .foregroundColor(HK.textFaint)
                     .padding(.top, 2)
-
-                if let url = URL(string: AppConfig.channelURL) {
-                    Link(destination: url) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "paperplane.fill")
-                                .font(.system(size: 11, weight: .bold))
-                            Text("进度见 \(AppConfig.channelName)")
-                                .font(.system(size: 11.5, weight: .semibold, design: .rounded))
-                        }
-                        .foregroundColor(HK.cyan)
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .background(Capsule().fill(HK.cyan.opacity(0.14))
-                                        .overlay(Capsule().stroke(HK.cyan.opacity(0.35), lineWidth: 0.7)))
-                    }
-                    .padding(.top, 6)
-                }
             }
             .padding(26)
             .frame(maxWidth: 330)

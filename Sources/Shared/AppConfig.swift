@@ -7,11 +7,9 @@ import Foundation
 enum AppConfig {
 
     static let appName        = "黑猫拦截 Pro"
-    static let appVersion     = "1.2.8"
-    static let buildNumber    = 127          // 1.2.8 build127
+    static let appVersion     = "1.3.0"
+    static let buildNumber    = 128          // 1.3.0 build128
     static let apiBase        = Obfs.join(0, 1)
-    static let channelURL     = "https://t.me/HeiMaoClub"
-    static let channelName    = "@HeiMaoClub"
 
     static let appBundleID    = "com.heimao.interceptor"
     static let tunnelBundleID = "com.heimao.interceptor.tunnel"

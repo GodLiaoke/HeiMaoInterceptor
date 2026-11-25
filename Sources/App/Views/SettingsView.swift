@@ -33,11 +33,6 @@ struct SettingsView: View {
                     deviceCard
                     rulesCard
                     aboutCard
-
-                    Text("全网最强 · \(AppConfig.channelName)")
-                        .font(.system(size: 10.5, weight: .regular, design: .rounded))
-                        .foregroundColor(HK.textFaint)
-                        .padding(.top, 6)
                 }
                 .padding(.horizontal, 18)
                 .padding(.top, 12)
@@ -335,21 +330,6 @@ struct SettingsView: View {
                     InfoRow(title: "兼容", value: "iOS 14.0 – iOS 27（含 26 / 27）")
                     InfoRow(title: "内核", value: "Packet Tunnel · 用户态协议栈")
                     InfoRow(title: "代码指纹", value: Self.codeFingerprint, multiline: true)
-                    DividerLine()
-                    if let url = URL(string: AppConfig.channelURL) {
-                        Link(destination: url) {
-                            HStack {
-                                Image(systemName: "paperplane.fill")
-                                    .font(.system(size: 12, weight: .semibold))
-                                Text("加入官方频道 \(AppConfig.channelName)")
-                                    .font(.system(size: 12.5, weight: .semibold, design: .rounded))
-                                Spacer()
-                                Image(systemName: "arrow.up.right")
-                                    .font(.system(size: 10, weight: .bold))
-                            }
-                            .foregroundColor(HK.cyan)
-                        }
-                    }
                 }
             }
         }
