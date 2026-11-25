@@ -2,6 +2,34 @@
 
 ## 当前版本
 
+**v1.3.0 build 128**（2026-11-25 · 移除官方频道引流）
+
+### 客户端
+
+| 项 | 处置 |
+|---|---|
+| 主界面最下方「官方频道」卡 | 整卡删除（纸飞机图标 + `@HeiMaoClub` + 「前往」按钮），`channelCard` 定义一并移除 |
+| 设置页底部「全网最强 · @HeiMaoClub」 | 删除 |
+| 设置 · 关于 里的「加入官方频道 @HeiMaoClub」 | 删除（连同上方分隔线） |
+| 维护页「进度见 @HeiMaoClub」 | 删除，只留「维护结束后重新打开应用即可」 |
+| 兜底公告第 5 条 | 原先指向官方频道，改为「在设置页刷新状态，或重新激活卡密」。**云端公告（站长自己在后台发的那条）内容与展示逻辑一行未动** |
+| 常量 | `AppConfig.channelURL` / `channelName` 删除（已无引用；二进制里不再有 `t.me` / `HeiMaoClub`） |
+| 版本 | 1.3.0 / 128（双端 `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION`） |
+
+### 构建与校验
+
+- 流水线：commit `20ed5fa` → run `45558688805`（macos 四机型并行，success）
+- 符号/字符串实测：`HeiMaoClub`、`官方频道`、`t.me`、`全网最强`、`加入官方` 全部 0 命中
+- iOS 14 安全项复核：`SwitchToggleStyle` / `toggleStyle` / `ScrollViewReader` / `ScrollViewProxy` / `ScM` 仍为 0（1.2.8 的崩点没有回来；`Toggle` 只命中 `onToggle` 这个普通属性名，不是 SwiftUI `Toggle`）
+- 双端 1.3.0 / 128，`MinimumOSVersion = 14.0`
+- 代码段指纹 `37f6548f62f6bc80…`（签名包与未签名包一致）
+
+### 线上状态
+
+- **客户端包已构建、已核对，但还没上线**（本轮没有拿到服务器密码，`/dl/`、版本表、下载页仍停在 1.2.8 / 127）
+
+---
+
 **v1.2.8 build 127**（2026-11-21 · 修 iOS 14 进设置闪退 + 卡密永久卡）
 
 ### 客户端
